@@ -3,6 +3,7 @@
 #include <Control_Surface.h>
 #include <Wire.h>
 #include "pico/multicore.h"
+#include "ui.h"
 
 Adafruit_MCP23X17 mcp;
 
@@ -146,10 +147,13 @@ void setup()
   delay(500);
 
   keyboard_config();
+
+  ui_init();
 }
 
 //Loop do núcleo 0
 void loop()
 {
   keyboard_loop();
+  ui_update();
 }
