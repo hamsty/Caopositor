@@ -431,16 +431,16 @@ void carregarSampleDoSD(const char *nomeArquivo)
   }
 }
 
-// Escaneia matriz do teclado para saber qual tecla foi pressionada e envia para o core 1 para processamento do audio e midi.
+//escaneia matriz do teclado para saber qual tecla foi pressionada
 void keyboard_loop()
 {
-  for (int i = 0; i < 7; i++)
+  for (int i=0; i<7; i++)
   {
-    mcp.digitalWrite(i + 8, LOW);
+    mcp.digitalWrite(i+8, LOW);
     delayMicroseconds(2);
-    for (int j = 0; j < 8; j++)
+    for (int j=0; j<8; j++)
     {
-      uint8_t key = i * 8 + (7 - j);
+      uint8_t key = i*8 + (7-j);
       int key_state = mcp.digitalRead(j);
       if (key_state != key_old_state[key])
       {
