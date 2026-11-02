@@ -31,6 +31,7 @@ volatile uint32_t loadedSampleMaxIndex = 0;
 const float FREQ_BASE = (float)AUDIO_RATE / (float)TAMANHO_BUFFER;
 
 uint8_t offset = 53;
+#include "ui.h"
 
 Adafruit_MCP23X17 mcp;
 
@@ -548,6 +549,7 @@ void core1_entry()
     tight_loop_contents();
     midi.update();
     keyboard_loop();
+    ui_update();
     // Olha se o botão A foi pressionado e muda o sample carregado no buffer global
     if (digitalRead(5) == LOW)
     {
@@ -656,6 +658,8 @@ void setup()
   Serial.println("Core1 started");
 
   add_repeating_timer_us(-61, rotinaDeGravacao, NULL, &timerGravacao);
+
+  ui_init();
 }
 
 // Loop do núcleo 0
