@@ -60,33 +60,31 @@ void keyboard_config()
   for (int i = 0; i < 48; i++)
   {
     key_old_state[i] = false;
-  }
+  } // inicializa o estado de cada tecla do teclado
 }
 
-// Escaneia matriz do teclado para saber qual tecla foi pressionada e envia para o core 1 para processamento do audio e midi.
+//escaneia matriz do teclado para saber qual tecla foi pressionada
 void keyboard_loop()
 {
-  for (int i = 0; i < 7; i++)
+  for (int i=0; i<7; i++)
   {
-    mcp.digitalWrite(i + 8, LOW);
+    mcp.digitalWrite(i+8, LOW);
     delayMicroseconds(2);
-    for (int j = 0; j < 8; j++)
+    for (int j=0; j<8; j++)
     {
-      uint8_t key = i * 8 + (7 - j);
+      uint8_t key = i*8 + (7-j);
       int key_state = mcp.digitalRead(j);
       if (key_state != key_old_state[key])
       {
         key_old_state[key] = key_state;
         if (key_old_state[key] == LOW)
         {
-          // midi.sendNoteOn({53+key, channel}, 100);
-          multicore_fifo_push_blocking(53 + key + (0x90 << 8));
-          // Serial.printf("key %d pressed, %d %d \n", key, i,j);
+          ui_onKeyPressed(key);
+          multicore_fifo_push_blocking(53+key+(0x90 << 8));
         }
         else
         {
-          multicore_fifo_push_blocking(53 + key + (0x80 << 8));
-          // midi.sendNoteOff({53+key, channel}, 100);
+          multicore_fifo_push_blocking(53+key+(0x80 << 8));
         }
       }
     }
@@ -95,7 +93,7 @@ void keyboard_loop()
   }
 }
 
-//processo que roda no núcleo 1 sempre que uma tecla for pressionada ou solta.
+//processo que roda no núcleo 1 sempre que uma tecla for pressionada ou solta
 void core1_interrupt_handler()
 {
   while (multicore_fifo_rvalid())
@@ -116,18 +114,15 @@ void core1_interrupt_handler()
     }
   }
 
-  multicore_fifo_clear_irq(); // Clear interrupt
+  multicore_fifo_clear_irq(); 
 }
 
 //Loop do núcleo 1
 void core1_entry()
 {
   midi.begin();
-
   multicore_fifo_clear_irq();
-
   irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_interrupt_handler);
-
   irq_set_enabled(SIO_IRQ_PROC1, true);
 
   while (1)
@@ -141,13 +136,9 @@ void core1_entry()
 void setup()
 {
   multicore_launch_core1(core1_entry);
-
   Serial.begin(115200);
-
   delay(500);
-
   keyboard_config();
-
   ui_init();
 }
 
