@@ -9,24 +9,55 @@
 
 #define MOZZI_I2S_PIN_BCK 14
 #define MOZZI_I2S_PIN_DATA 20
+#define MOZZI_AUDIO_RATE 16384
 
 #include <Mozzi.h>
-#include <Oscil.h>
-#include <tables/sin2048_int8.h> // sine table for oscillator
+#include <Sample.h>
 #include <mozzi_midi.h>
 #include <ADSR.h>
 
 using namespace std;
+
+#define TAMANHO_BUFFER 32768
+
+int8_t loadedSample[TAMANHO_BUFFER];
+
+volatile bool gravando = false;
+volatile uint32_t loadedSampleMaxIndex = 0;
+
+const float FREQ_BASE = (float)AUDIO_RATE / (float)TAMANHO_BUFFER;
 
 Adafruit_MCP23X17 mcp;
 
 // USBMIDI_Interface midi;
 USBDebugMIDI_Interface midi(115200);
 
-Oscil<SIN2048_NUM_CELLS, MOZZI_AUDIO_RATE> aSin(SIN2048_DATA);
+Sample<TAMANHO_BUFFER, AUDIO_RATE> vozes[10]{
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
+    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample)};
 
 // // envelope generator
-ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelope;
+ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelopes[10]{
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
+    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>()};
+
+bool vozes_ativas[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+uint8_t vozes_nota[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 
 const Channel channel = Channel_1;
 
@@ -83,7 +114,6 @@ void keyboard_config()
   }
 }
 
-
 void midi_handle(uint8_t code, uint8_t note)
 {
   switch (code)
@@ -104,11 +134,38 @@ void keysound_handle(uint8_t code, uint8_t note)
   switch (code)
   {
   case 0x90:
-    aSin.setFreq_Q16n16(Q16n16_mtof(Q8n0_to_Q16n16(note))); // accurate frequency
-    envelope.noteOn();
+    for (int i = 0; i < 10; i++)
+    {
+      if (!vozes_ativas[i])
+      {
+        // Calcula o deslocamento de tom (pitch). Assumimos 60 (Dó4) como a nota do som original gravado.
+        float multiplicador = pow(2.0, (note - 60.0) / 12.0);
+        vozes[i].setFreq(FREQ_BASE * multiplicador);
+
+        vozes[i].start(); // Reinicia o ponteiro de leitura do sample para o início
+        envelopes[i].noteOn();
+        vozes_nota[i] = note;
+        vozes_ativas[i] = true;
+        break;
+      }
+      if (i == 9)
+      {
+        Serial.println("Todas as vozes estão ocupadas!");
+        return;
+      }
+    }
+
     break;
   case 0x80:
-    envelope.noteOff();
+    for (int i = 0; i < 10; i++)
+    {
+      if (vozes_ativas[i] && vozes_nota[i] == note)
+      {
+        vozes_ativas[i] = false;
+        envelopes[i].noteOff();
+        break;
+      }
+    }
     break;
   default:
     break;
@@ -118,16 +175,78 @@ void keysound_handle(uint8_t code, uint8_t note)
 // processo que roda no núcleo 1 sempre que uma tecla for pressionada ou solta.
 void handle_keyboard_event(uint8_t code, uint8_t note)
 {
-    switch (mode)
+  switch (mode)
+  {
+  case 0x01: // Keyboard mode
+    keysound_handle(code, note);
+    break;
+  case 0x00: // midi mode
+    midi_handle(code, note);
+    break;
+  default:
+    break;
+  }
+}
+
+uint32_t encontrarInicioDados(File &arquivo)
+{
+  arquivo.seek(0);
+  char buffer[4];
+
+  // Procura pela sequência de caracteres "data"
+  while (arquivo.available() >= 4)
+  {
+    buffer[0] = arquivo.read();
+
+    if (buffer[0] == 'd')
     {
-    case 0x01: // Keyboard mode
-      keysound_handle(code, note);
-    case 0x00: // midi mode
-      midi_handle(code, note);
-      break;
-    default:
-      break;
+      buffer[1] = arquivo.read();
+      buffer[2] = arquivo.read();
+      buffer[3] = arquivo.read();
+
+      if (buffer[1] == 'a' && buffer[2] == 't' && buffer[3] == 'a')
+      {
+        // Pula os 4 bytes seguintes (que guardam o tamanho do bloco de áudio)
+        arquivo.seek(arquivo.position() + 4);
+        return arquivo.position(); // Retorna o tamanho exato do cabeçalho
+      }
+
+      // Se não for "data", volta 3 passos atrás para não saltar letras por engano
+      arquivo.seek(arquivo.position() - 3);
     }
+  }
+  return 44; // Retorna o padrão 44 se o bloco não for encontrado
+}
+
+void carregarSampleDoSD(const char *nomeArquivo)
+{
+  File arquivoWav = SD.open(nomeArquivo);
+
+  if (arquivoWav)
+  {
+    uint32_t tamanhoCabecalho = encontrarInicioDados(arquivoWav);
+    Serial.print("Tamanho do cabecalho detetado: ");
+    Serial.println(tamanhoCabecalho);
+    arquivoWav.seek(tamanhoCabecalho); // Pula o cabeçalho padrão de 44 bytes do formato WAV
+
+    loadedSampleMaxIndex = 0; // Reinicia o índice do buffer global
+
+    // Lê os dados brutos até encher o buffer ou o arquivo acabar
+    while (arquivoWav.available() && loadedSampleMaxIndex < TAMANHO_BUFFER)
+    {
+      // Lê o byte (0 a 255) e subtrai 128 para centralizar a onda (-128 a 127)
+      loadedSample[loadedSampleMaxIndex] = arquivoWav.read() - 128;
+      loadedSampleMaxIndex++;
+    }
+
+    arquivoWav.close();
+    Serial.print("Sample carregado com sucesso: ");
+    Serial.println(nomeArquivo);
+  }
+  else
+  {
+    Serial.println("Erro ao abrir o arquivo no SD!");
+  }
 }
 
 // Escaneia matriz do teclado para saber qual tecla foi pressionada e envia para o core 1 para processamento do audio e midi.
@@ -146,12 +265,12 @@ void keyboard_loop()
         key_old_state[key] = key_state;
         if (key_old_state[key] == LOW)
         {
-          handle_keyboard_event(0x90, 53+key);
+          handle_keyboard_event(0x90, 53 + key);
           Serial.printf("key %d pressed, %d %d \n", key, i, j);
         }
         else
         {
-          handle_keyboard_event(0x80, 53+key);
+          handle_keyboard_event(0x80, 53 + key);
         }
       }
     }
@@ -159,7 +278,6 @@ void keyboard_loop()
     delayMicroseconds(2);
   }
 }
-
 
 void test_spi()
 {
@@ -225,18 +343,42 @@ void core1_entry()
     tight_loop_contents();
     midi.update();
     keyboard_loop();
+    // Olha se o botão A foi pressionado e muda o sample carregado no buffer global
+    if (digitalRead(5) == LOW)
+    {
+      carregarSampleDoSD("yogurt.wav");
+      delay(500);
+    }
+    // olha se o botão B foi pressionado e muda o sample carregado no buffer global
+    if (digitalRead(6) == LOW)
+    {
+      carregarSampleDoSD("grampiano.wav");
+      delay(500);
+    }
   }
 }
 
-void updateControl(){
-  envelope.update();
+void updateControl()
+{
+  for (int i = 0; i < 10; i++)
+  {
+    envelopes[i].update();
+  }
 }
 
+AudioOutput updateAudio()
+{
+  int32_t mix = 0;
+  for (int i = 0; i < 10; i++)
+  {
+    if (vozes_ativas[i])
+    {
+      mix += (envelopes[i].next() * vozes[i].next());
+    }
+  }
 
-AudioOutput updateAudio(){
-  return MonoOutput::from16Bit(envelope.next() * aSin.next());
+  return MonoOutput::from16Bit(mix / 4);
 }
-
 
 // configuração do núcleo principal
 void setup()
@@ -244,13 +386,17 @@ void setup()
 
   Serial.begin(115200);
 
-  while(!Serial){
+  while (!Serial)
+  {
     delay(20);
   }
 
   midi.begin();
 
   Serial.println("MIDI Started");
+
+  pinMode(5, INPUT_PULLUP); // botao A
+  pinMode(6, INPUT_PULLUP); // botao B
 
   pinMode(SS, OUTPUT);
   digitalWrite(SS, HIGH);
@@ -268,13 +414,16 @@ void setup()
   else
 
   {
+
     Serial.println("SD card initialized.");
   }
 
-  envelope.setADLevels(255,64);
-  envelope.setTimes(50,200,10000,200); 
+  for (int i = 0; i < 10; i++)
+  {
+    envelopes[i].setADLevels(255, 64);
+    envelopes[i].setTimes(50, 200, 10000, 200);
+  }
 
-  aSin.setFreq(440); // default frequency
   startMozzi();
 
   Serial.println("Mozzi Started");
@@ -286,7 +435,6 @@ void setup()
   multicore_launch_core1(core1_entry);
 
   Serial.println("Core1 started");
-
 }
 
 // Loop do núcleo 0
