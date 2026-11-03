@@ -4,17 +4,17 @@
 #include <Wire.h>
 #include <pico/multicore.h>
 #include <SD.h>
-// #define MOZZI_AUDIO_MODE MOZZI_OUTPUT_I2S_DAC
-// #define MOZZI_CONTROL_RATE 128 // Hz, powers of 2 are most reliable
+#define MOZZI_AUDIO_MODE MOZZI_OUTPUT_I2S_DAC
+#define MOZZI_CONTROL_RATE 128 // Hz, powers of 2 are most reliable
 
-// #define MOZZI_I2S_PIN_BCK 14
-// #define MOZZI_I2S_PIN_DATA 20
+#define MOZZI_I2S_PIN_BCK 14
+#define MOZZI_I2S_PIN_DATA 20
 
-// #include <Mozzi.h>
-// #include <Oscil.h>
-// #include <tables/sin2048_int8.h> // sine table for oscillator
-// #include <mozzi_midi.h>
-// #include <ADSR.h>
+#include <Mozzi.h>
+#include <Oscil.h>
+#include <tables/sin2048_int8.h> // sine table for oscillator
+#include <mozzi_midi.h>
+#include <ADSR.h>
 
 using namespace std;
 
@@ -23,10 +23,10 @@ Adafruit_MCP23X17 mcp;
 // USBMIDI_Interface midi;
 USBDebugMIDI_Interface midi(115200);
 
-// Oscil<SIN2048_NUM_CELLS, MOZZI_AUDIO_RATE> aSin(SIN2048_DATA);
+Oscil<SIN2048_NUM_CELLS, MOZZI_AUDIO_RATE> aSin(SIN2048_DATA);
 
 // // envelope generator
-// ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelope;
+ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelope;
 
 const Channel channel = Channel_1;
 
@@ -83,35 +83,6 @@ void keyboard_config()
   }
 }
 
-// Escaneia matriz do teclado para saber qual tecla foi pressionada e envia para o core 1 para processamento do audio e midi.
-void keyboard_loop()
-{
-  for (int i = 0; i < 7; i++)
-  {
-    mcp.digitalWrite(i + 8, LOW);
-    delayMicroseconds(2);
-    for (int j = 0; j < 8; j++)
-    {
-      uint8_t key = i * 8 + (7 - j);
-      int key_state = mcp.digitalRead(j);
-      if (key_state != key_old_state[key])
-      {
-        key_old_state[key] = key_state;
-        if (key_old_state[key] == LOW)
-        {
-          multicore_fifo_push_blocking(53 + key + (0x90 << 8));
-          Serial.printf("key %d pressed, %d %d \n", key, i, j);
-        }
-        else
-        {
-          multicore_fifo_push_blocking(53 + key + (0x80 << 8));
-        }
-      }
-    }
-    mcp.digitalWrite(i + 8, HIGH);
-    delayMicroseconds(2);
-  }
-}
 
 void midi_handle(uint8_t code, uint8_t note)
 {
@@ -133,11 +104,11 @@ void keysound_handle(uint8_t code, uint8_t note)
   switch (code)
   {
   case 0x90:
-    // aSin.setFreq_Q16n16(Q16n16_mtof(Q8n0_to_Q16n16(note))); // accurate frequency
-    // envelope.noteOn();
+    aSin.setFreq_Q16n16(Q16n16_mtof(Q8n0_to_Q16n16(note))); // accurate frequency
+    envelope.noteOn();
     break;
   case 0x80:
-    // envelope.noteOff();
+    envelope.noteOff();
     break;
   default:
     break;
@@ -145,13 +116,8 @@ void keysound_handle(uint8_t code, uint8_t note)
 }
 
 // processo que roda no núcleo 1 sempre que uma tecla for pressionada ou solta.
-void core1_interrupt_handler()
+void handle_keyboard_event(uint8_t code, uint8_t note)
 {
-  while (multicore_fifo_rvalid())
-  {
-    uint32_t raw = multicore_fifo_pop_blocking();
-    uint8_t note = raw & 0xFF;
-    uint8_t code = (raw >> 8) & 0xFF;
     switch (mode)
     {
     case 0x01: // Keyboard mode
@@ -162,10 +128,38 @@ void core1_interrupt_handler()
     default:
       break;
     }
-  }
-
-  multicore_fifo_clear_irq(); // Clear interrupt
 }
+
+// Escaneia matriz do teclado para saber qual tecla foi pressionada e envia para o core 1 para processamento do audio e midi.
+void keyboard_loop()
+{
+  for (int i = 0; i < 7; i++)
+  {
+    mcp.digitalWrite(i + 8, LOW);
+    delayMicroseconds(2);
+    for (int j = 0; j < 8; j++)
+    {
+      uint8_t key = i * 8 + (7 - j);
+      int key_state = mcp.digitalRead(j);
+      if (key_state != key_old_state[key])
+      {
+        key_old_state[key] = key_state;
+        if (key_old_state[key] == LOW)
+        {
+          handle_keyboard_event(0x90, 53+key);
+          Serial.printf("key %d pressed, %d %d \n", key, i, j);
+        }
+        else
+        {
+          handle_keyboard_event(0x80, 53+key);
+        }
+      }
+    }
+    mcp.digitalWrite(i + 8, HIGH);
+    delayMicroseconds(2);
+  }
+}
+
 
 void test_spi()
 {
@@ -226,6 +220,34 @@ void test_spi()
 void core1_entry()
 {
 
+  while (1)
+  {
+    tight_loop_contents();
+    midi.update();
+    keyboard_loop();
+  }
+}
+
+void updateControl(){
+  envelope.update();
+}
+
+
+AudioOutput updateAudio(){
+  return MonoOutput::from16Bit(envelope.next() * aSin.next());
+}
+
+
+// configuração do núcleo principal
+void setup()
+{
+
+  Serial.begin(115200);
+
+  while(!Serial){
+    delay(20);
+  }
+
   midi.begin();
 
   Serial.println("MIDI Started");
@@ -249,59 +271,26 @@ void core1_entry()
     Serial.println("SD card initialized.");
   }
 
-  // envelope.setADLevels(255,64);
-  // envelope.setTimes(50,200,10000,200); 
+  envelope.setADLevels(255,64);
+  envelope.setTimes(50,200,10000,200); 
 
-  // aSin.setFreq(440); // default frequency
-  // startMozzi();
+  aSin.setFreq(440); // default frequency
+  startMozzi();
 
-  // Serial.println("Mozzi Started");
+  Serial.println("Mozzi Started");
 
-  multicore_fifo_clear_irq();
+  keyboard_config();
 
-  irq_set_exclusive_handler(SIO_IRQ_PROC1, core1_interrupt_handler);
-
-  irq_set_enabled(SIO_IRQ_PROC1, true);
-
-  while (1)
-  {
-    tight_loop_contents();
-    midi.update();
-    // audioHook();
-  }
-}
-
-// void updateControl(){
-//   envelope.update();
-// }
-
-
-// AudioOutput updateAudio(){
-//   return MonoOutput::from16Bit(envelope.next() * aSin.next());
-// }
-
-
-// configuração do núcleo principal
-void setup()
-{
-
-  Serial.begin(115200);
-
-  while(!Serial){
-    delay(20);
-  }
+  Serial.println("Keyboard configuration done!");
 
   multicore_launch_core1(core1_entry);
 
   Serial.println("Core1 started");
 
-  keyboard_config();
-
-  Serial.println("Keyboard configuration done!");
 }
 
 // Loop do núcleo 0
 void loop()
 {
-  keyboard_loop();
+  audioHook();
 }
