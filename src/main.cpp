@@ -15,10 +15,13 @@
 #include <Sample.h>
 #include <mozzi_midi.h>
 #include <ADSR.h>
+#include <arduinoFFT.h>
 
-using namespace std;
+#include "pico/stdlib.h" // Biblioteca nativa do RP2040 para timers
 
 #define TAMANHO_BUFFER 32768
+
+struct repeating_timer timerGravacao;
 
 int8_t loadedSample[TAMANHO_BUFFER];
 
@@ -27,10 +30,14 @@ volatile uint32_t loadedSampleMaxIndex = 0;
 
 const float FREQ_BASE = (float)AUDIO_RATE / (float)TAMANHO_BUFFER;
 
+uint8_t offset = 53;
+
 Adafruit_MCP23X17 mcp;
 
 // USBMIDI_Interface midi;
 USBDebugMIDI_Interface midi(115200);
+
+volatile byte volumeMestre = 255;
 
 Sample<TAMANHO_BUFFER, AUDIO_RATE> vozes[10]{
     Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
@@ -66,6 +73,179 @@ int key_old_state[56];
 int mode = 0x01; // testando som
 
 // inicia a comunicação I2C e configura pinos do teclado
+
+const uint16_t amostrasFFT = 1024*2*2*2;     // Deve ser sempre uma potência de 2
+const double freqAmostragem = 16384.0; // A taxa de gravação do seu microfone
+
+// Arrays para cálculo dos números complexos (usamos float para poupar RAM do RP2040)
+float vReal[amostrasFFT];
+float vImag[amostrasFFT];
+
+// Instancia o objeto FFT
+ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, amostrasFFT, freqAmostragem);
+
+// Variável global que o Mozzi usará para a modulação de Pitch
+volatile float notaOriginalGravada = 60.0;
+
+void analisarAmostra()
+{
+  // Pula as primeiras 2000 amostras (0.12 segundos) para ignorar
+  // o ruído de clique do botão ou o silêncio inicial da gravação
+  int offset = 2000;
+
+  // 1. Prepara os dados
+  for (uint16_t i = 0; i < amostrasFFT; i++)
+  {
+    vReal[i] = (float)loadedSample[i + offset];
+    vImag[i] = 0.0; // A parte imaginária começa sempre em zero
+  }
+
+  // 2. Aplica a janela de Hamming para suavizar o corte e focar no centro da onda
+  FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+
+  // 3. Executa a Transformada (tempo para frequências)
+  FFT.compute(FFT_FORWARD);
+
+  // 4. Converte os resultados complexos em amplitudes legíveis
+  FFT.complexToMagnitude();
+
+  // 5. Encontra o pico dominante (frequência fundamental)
+  // A biblioteca faz uma interpolação matemática para dar precisão decimal
+  float frequenciaDetectada = FFT.majorPeak();
+
+  // 6. Filtro de segurança: se detetar ruído de fundo extremo (< 65Hz)
+  if (frequenciaDetectada < 65.0 || frequenciaDetectada > 2000.0)
+  {
+    frequenciaDetectada = 261.63; // Assume Dó Central (C4) como falha segura
+  }
+
+  // Converte a Frequência (Hz) para Nota MIDI fracionária
+  notaOriginalGravada = 69.0 + 12.0 * log2(frequenciaDetectada / 440.0);
+
+  Serial.print("FFT Frequencia Dominante: ");
+  Serial.print(frequenciaDetectada);
+  Serial.print(" Hz | Nota MIDI: ");
+  Serial.println(notaOriginalGravada);
+}
+#define PINO_MICROFONE 28
+
+const byte cabecalhoWAV[44] = {
+    'R', 'I', 'F', 'F',
+    0x24, 0x80, 0x00, 0x00, // Tamanho do arquivo - 8 bytes (36 + 32768 = 32804)
+    'W', 'A', 'V', 'E',
+    'f', 'm', 't', ' ',
+    0x10, 0x00, 0x00, 0x00, // Tamanho do chunk 'fmt ' (16 bytes para PCM)
+    0x01, 0x00,             // Formato do áudio (1 = PCM)
+    0x01, 0x00,             // Número de canais (1 = Mono)
+    0x00, 0x40, 0x00, 0x00, // Taxa de amostragem (16384 Hz em Little Endian)
+    0x00, 0x40, 0x00, 0x00, // Byte Rate (SampleRate * Canais * Bits/8)
+    0x01, 0x00,             // Block Align (1 byte por frame)
+    0x08, 0x00,             // Bits por amostra (8 bits)
+    'd', 'a', 't', 'a',
+    0x00, 0x80, 0x00, 0x00 // Tamanho exato dos dados de áudio (32768 bytes)
+};
+
+void salvarGravacaoNoSD(const char *nomeArquivo)
+{
+  // Remove o arquivo antigo se existir com o mesmo nome
+  if (SD.exists(nomeArquivo))
+  {
+    SD.remove(nomeArquivo);
+  }
+
+  File arquivoWav = SD.open(nomeArquivo, FILE_WRITE);
+  if (arquivoWav)
+  {
+    // 1. Escreve os 44 bytes do cabeçalho
+    arquivoWav.write(cabecalhoWAV, 44);
+
+    // 2. Escreve os 32768 bytes de áudio convertendo para sem sinal (WAV 8-bit padrão)
+    for (int i = 0; i < TAMANHO_BUFFER; i++)
+    {
+      byte sampleSemSinal = loadedSample[i] + 128;
+      arquivoWav.write(sampleSemSinal);
+    }
+
+    arquivoWav.close();
+    Serial.println("Gravacao salva com sucesso no SD!");
+  }
+  else
+  {
+    Serial.println("Erro ao salvar arquivo no SD.");
+  }
+}
+
+void octaveUp()
+{
+  if (offset < (255 - 32))
+  {
+    offset += 12;
+    Serial.print("Octave Up! Offset: ");
+    Serial.println(offset);
+  }
+}
+
+void octaveDown()
+{
+  if (offset > 32)
+  {
+    offset -= 12;
+    Serial.print("Octave Down! Offset: ");
+    Serial.println(offset);
+  }
+}
+
+void VolumeUp()
+{
+  if (volumeMestre < 255)
+  {
+    volumeMestre += 10;
+    Serial.print("Volume Up! Volume: ");
+    Serial.println(volumeMestre);
+  }
+}
+
+void VolumeDown()
+{
+  if (volumeMestre > 10)
+  {
+    volumeMestre -= 10;
+    Serial.print("Volume Down! Volume: ");
+    Serial.println(volumeMestre);
+  }
+}
+
+bool rotinaDeGravacao(struct repeating_timer *t)
+{
+  if (gravando && loadedSampleMaxIndex < TAMANHO_BUFFER)
+  {
+
+    int leituraADC = analogRead(PINO_MICROFONE);
+
+    // Desloca 4 bits à direita (divide por 16) para ir de 12 para 8 bits, depois centraliza no zero
+    loadedSample[loadedSampleMaxIndex] = (leituraADC >> 4) - 128;
+
+    loadedSampleMaxIndex++;
+    if (loadedSampleMaxIndex == TAMANHO_BUFFER)
+    {
+      analisarAmostra(); // Analisa a amostra gravada para determinar a nota original
+      salvarGravacaoNoSD("gravacao.wav");
+      Serial.println("Gravacao finalizada, buffer cheio.");
+    }
+  }
+  else
+  {
+    gravando = false;
+  }
+  return true; // Mantém o temporizador ativo em segundo plano
+}
+
+void iniciarGravacao()
+{
+  loadedSampleMaxIndex = 0;
+  gravando = true;
+}
+
 void keyboard_config()
 {
   Wire1.setSDA(2);
@@ -139,7 +319,7 @@ void keysound_handle(uint8_t code, uint8_t note)
       if (!vozes_ativas[i])
       {
         // Calcula o deslocamento de tom (pitch). Assumimos 60 (Dó4) como a nota do som original gravado.
-        float multiplicador = pow(2.0, (note - 60.0) / 12.0);
+        float multiplicador = pow(2.0, (note - notaOriginalGravada) / 12.0);
         vozes[i].setFreq(FREQ_BASE * multiplicador);
 
         vozes[i].start(); // Reinicia o ponteiro de leitura do sample para o início
@@ -242,6 +422,7 @@ void carregarSampleDoSD(const char *nomeArquivo)
     arquivoWav.close();
     Serial.print("Sample carregado com sucesso: ");
     Serial.println(nomeArquivo);
+    analisarAmostra(); // Analisa a amostra carregada para determinar a nota original
   }
   else
   {
@@ -265,12 +446,36 @@ void keyboard_loop()
         key_old_state[key] = key_state;
         if (key_old_state[key] == LOW)
         {
-          handle_keyboard_event(0x90, 53 + key);
-          Serial.printf("key %d pressed, %d %d \n", key, i, j);
+          if (key < 32)
+          {
+            handle_keyboard_event(0x90, offset + key);
+            Serial.printf("key %d pressed, %d %d \n", key, i, j);
+          }
+          else
+          {
+            switch (key)
+            {
+            case 40:
+              octaveDown();
+              break;
+            case 41:
+              octaveUp();
+              break;
+            case 42:
+              VolumeDown();
+              break;
+            case 43:
+              VolumeUp();
+              break;
+            }
+          }
         }
         else
         {
-          handle_keyboard_event(0x80, 53 + key);
+          if (key < 32)
+          {
+            handle_keyboard_event(0x80, offset + key);
+          }
         }
       }
     }
@@ -347,13 +552,22 @@ void core1_entry()
     if (digitalRead(5) == LOW)
     {
       carregarSampleDoSD("yogurt.wav");
-      delay(500);
+      delay(50); // Debounce para evitar múltiplas leituras rápidas
     }
     // olha se o botão B foi pressionado e muda o sample carregado no buffer global
     if (digitalRead(6) == LOW)
     {
       carregarSampleDoSD("grampiano.wav");
-      delay(500);
+      delayMicroseconds(20);
+    }
+    // Botão C inicia a gravação do microfone no buffer global
+    if (digitalRead(22) == LOW)
+    {
+      uint32_t start_time = millis();
+      while (millis() - start_time < 300);
+      iniciarGravacao();
+      start_time = millis();
+      while (millis() - start_time < 50);
     }
   }
 }
@@ -377,6 +591,8 @@ AudioOutput updateAudio()
     }
   }
 
+  mix = (mix * volumeMestre) >> 8;
+
   return MonoOutput::from16Bit(mix / 4);
 }
 
@@ -391,12 +607,15 @@ void setup()
     delay(20);
   }
 
+  analogReadResolution(12);
+
   midi.begin();
 
   Serial.println("MIDI Started");
 
-  pinMode(5, INPUT_PULLUP); // botao A
-  pinMode(6, INPUT_PULLUP); // botao B
+  pinMode(5, INPUT_PULLUP);  // botao A
+  pinMode(6, INPUT_PULLUP);  // botao B
+  pinMode(22, INPUT_PULLUP); // botao C
 
   pinMode(SS, OUTPUT);
   digitalWrite(SS, HIGH);
@@ -435,6 +654,8 @@ void setup()
   multicore_launch_core1(core1_entry);
 
   Serial.println("Core1 started");
+
+  add_repeating_timer_us(-61, rotinaDeGravacao, NULL, &timerGravacao);
 }
 
 // Loop do núcleo 0
