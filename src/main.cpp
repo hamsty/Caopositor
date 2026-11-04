@@ -136,6 +136,10 @@ volatile int bufferAudioMatriz[AMOSTRAS_MATRIZ];
 volatile int indiceBufferMatriz = 0;
 volatile bool bufferMatrizPronto = false;
 
+volatile bool fogosAtivos = false;
+unsigned long tempoInicioFogos = 0;
+int centroX = 2, centroY = 2;
+
 int getLedIndex(int x, int y)
 {
   // Invertemos a lógica: o y=0 agora mapeia para a base física da placa
@@ -151,22 +155,117 @@ int getLedIndex(int x, int y)
   }
 }
 
-void animarEspectroReal() {
-  if (!bufferMatrizPronto) return;
+void animarGravacao() {
+  if (millis() - ultimoUpdateMatriz < 50) return; // Atualiza a 20 FPS
+  ultimoUpdateMatriz = millis();
+  
+  matriz.clear();
+
+  // 1. Calcula o progresso exato da gravação (de 0.0 a 1.0)
+  float progresso = (float)loadedSampleMaxIndex / TAMANHO_BUFFER;
+  
+  // O raio máximo num ecrã 5x5 (distância em cruz do centro até a ponta) é 4
+  int raioAtual = (int)(progresso * 4.0); 
+
+  // Efeito extra: Faz o anel mais externo (que está a crescer) piscar rapidamente 
+  float pulsoDaBorda = (sin(millis() / 80.0) + 1.0) / 2.0;
+
+  for (int x = 0; x < 5; x++) {
+    for (int y = 0; y < 5; y++) {
+      
+      // Calcula a distância geométrica do LED até ao centro (x=2, y=2)
+      int distancia = abs(x - 2) + abs(y - 2);
+      
+      // Acende os LEDs que já foram alcançados pelo progresso
+      if (distancia <= raioAtual) {
+        
+        int brilho = 3; // Brilho bem fraco e fixo para o "passado" da gravação
+        
+        // Se for o LED do momento exato da expansão, aplica o efeito de pulsar (Máximo 10)
+        if (distancia == raioAtual) {
+          brilho = (int)(pulsoDaBorda * 10.0);
+          if (brilho < 1) brilho = 1; // Não deixa apagar totalmente
+        }
+
+        matriz.setPixelColor(getLedIndex(x, y), matriz.Color(brilho, 0, 0));
+      }
+    }
+  }
+
+  matriz.show();
+}
+
+void animarFogos() {
+  if (!fogosAtivos) return;
+
+  if (millis() - ultimoUpdateMatriz < 50) return;
+  ultimoUpdateMatriz = millis();
+
+  unsigned long tempoDecorrido = millis() - tempoInicioFogos;
+  matriz.clear();
+
+  if (tempoDecorrido < 100) {
+    // Fase 1: Semente brilhante no centro (Luz branca/amarelada)
+    matriz.setPixelColor(getLedIndex(centroX, centroY), matriz.Color(10, 10, 10));
+  } 
+  else if (tempoDecorrido < 300) {
+    // Fase 2: Explosão adjacente (Cores aleatórias)
+    uint32_t cor = matriz.Color(random(2, 10), random(2, 10), random(2, 10));
+    for(int i = -1; i <= 1; i++) {
+      for(int j = -1; j <= 1; j++) {
+        if (i == 0 && j == 0) continue; // Pula o centro
+        int nx = centroX + i;
+        int ny = centroY + j;
+        // Verifica os limites da matriz antes de acender
+        if(nx >= 0 && nx < 5 && ny >= 0 && ny < 5) {
+          matriz.setPixelColor(getLedIndex(nx, ny), cor);
+        }
+      }
+    }
+  } 
+  else if (tempoDecorrido < 500) {
+    // Fase 3: Dissipação nas pontas (Brilho fraco)
+    uint32_t cor = matriz.Color(random(1, 5), random(1, 5), random(1, 5));
+    int posicoes[4][2] = {{centroX-2, centroY}, {centroX+2, centroY}, {centroX, centroY-2}, {centroX, centroY+2}};
+    
+    for(int i = 0; i < 4; i++) {
+      int nx = posicoes[i][0];
+      int ny = posicoes[i][1];
+      if (nx >= 0 && nx < 5 && ny >= 0 && ny < 5) {
+         matriz.setPixelColor(getLedIndex(nx, ny), cor);
+      }
+    }
+  } 
+  else {
+    // Fase 4: Fim da animação
+    fogosAtivos = false;
+  }
+  
+  matriz.show();
+}
+
+
+
+void animarEspectroReal()
+{
+  if (!bufferMatrizPronto)
+    return;
 
   long mediaDC = 0;
-  for (int i = 0; i < AMOSTRAS_MATRIZ; i++) {
+  for (int i = 0; i < AMOSTRAS_MATRIZ; i++)
+  {
     mediaDC += bufferAudioMatriz[i];
   }
   mediaDC /= AMOSTRAS_MATRIZ;
 
   // Carrega o áudio removendo o DC offset
-  for (int i = 0; i < AMOSTRAS_MATRIZ; i++) {
+  for (int i = 0; i < AMOSTRAS_MATRIZ; i++)
+  {
     vRealMatriz[i] = (float)(bufferAudioMatriz[i] - mediaDC);
     vImagMatriz[i] = 0.0;
   }
 
-  bufferMatrizPronto = false; 
+  bufferMatrizPronto = false;
 
   FFTMatriz.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
   FFTMatriz.compute(FFT_FORWARD);
@@ -174,53 +273,69 @@ void animarEspectroReal() {
 
   float picos[5] = {0, 0, 0, 0, 0};
 
-  for (int i = 1; i < (AMOSTRAS_MATRIZ / 2); i++) {
+  for (int i = 1; i < (AMOSTRAS_MATRIZ / 2); i++)
+  {
     int col = 0;
-    if (i <= 3)       col = 0; // Graves
-    else if (i <= 8)  col = 1; // Médios-Graves
-    else if (i <= 18) col = 2; // Médios
-    else if (i <= 40) col = 3; // Médios-Agudos
-    else              col = 4; // Agudos
+    if (i <= 3)
+      col = 0; // Graves
+    else if (i <= 8)
+      col = 1; // Médios-Graves
+    else if (i <= 18)
+      col = 2; // Médios
+    else if (i <= 40)
+      col = 3; // Médios-Agudos
+    else
+      col = 4; // Agudos
 
     // Guarda apenas o valor mais alto daquela coluna
-    if (vRealMatriz[i] > picos[col]) {
+    if (vRealMatriz[i] > picos[col])
+    {
       picos[col] = vRealMatriz[i];
     }
   }
 
   matriz.clear();
 
-  float limiteMinimo = 500.0;  // Valores abaixo disso ficam com 0 LEDs (Aumente se tiver ruído "fantasma")
+  float limiteMinimo = 500.0;    // Valores abaixo disso ficam com 0 LEDs (Aumente se tiver ruído "fantasma")
   float limiteMaximo = 300000.0; // Valores acima disso acendem os 5 LEDs (Diminua se nunca chegar no topo)
 
   float logMin = log10(limiteMinimo);
   float logMax = log10(limiteMaximo);
 
-  for (int col = 0; col < 5; col++) {
+  for (int col = 0; col < 5; col++)
+  {
     int intensidade = 0;
 
-    if (picos[col] > limiteMinimo) {
+    if (picos[col] > limiteMinimo)
+    {
       float meuLog = log10(picos[col]);
-      
+
       // Trava de segurança para não ultrapassar o máximo
-      if (meuLog > logMax) meuLog = logMax;
+      if (meuLog > logMax)
+        meuLog = logMax;
 
       // Regra de três para espalhar o volume certinho de 1 a 5 LEDs
       intensidade = (int)(((meuLog - logMin) / (logMax - logMin)) * 5.0) + 1;
     }
 
     // Trava de limites finais da matriz
-    if (intensidade > 5) intensidade = 5; 
-    if (intensidade < 0) intensidade = 0; 
+    if (intensidade > 5)
+      intensidade = 5;
+    if (intensidade < 0)
+      intensidade = 0;
 
     // Acende os LEDs
-    for (int y = 0; y < intensidade; y++) {
-      int indice = getLedIndex(col, y); 
-      
+    for (int y = 0; y < intensidade; y++)
+    {
+      int indice = getLedIndex(col, y);
+
       uint32_t cor;
-      if (y < 2) cor = matriz.Color(0, 5, 0);       // Verde
-      else if (y < 4) cor = matriz.Color(5, 5, 0); // Amarelo
-      else cor = matriz.Color(5, 0, 0);             // Vermelho
+      if (y < 2)
+        cor = matriz.Color(0, 5, 0); // Verde
+      else if (y < 4)
+        cor = matriz.Color(5, 5, 0); // Amarelo
+      else
+        cor = matriz.Color(5, 0, 0); // Vermelho
 
       matriz.setPixelColor(indice, cor);
     }
@@ -428,13 +543,13 @@ bool rotinaDeGravacao(struct repeating_timer *t)
     loadedSampleMaxIndex++;
     if (loadedSampleMaxIndex == TAMANHO_BUFFER)
     {
+      Serial.println("Gravacao finalizada, buffer cheio.");
+      setCurrentScreen(Tela::SOM_GRAVADO); // Muda para a tela de som gravado
+      desenharSomGravado();
       analisarAmostra(); // Analisa a amostra gravada para determinar a nota original
       char nomeArquivo[20];
       snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", ++recordedSampleIndex);
       salvarGravacaoNoSD(nomeArquivo);
-      Serial.println("Gravacao finalizada, buffer cheio.");
-      setCurrentScreen(Tela::SOM_GRAVADO); // Muda para a tela de som gravado
-      desenharSomGravado();
     }
   }
   else
@@ -509,6 +624,11 @@ void midi_handle(uint8_t code, uint8_t note)
   {
   case 0x90:
     midi.sendNoteOn({note, channel}, 100);
+
+    fogosAtivos = true;
+    tempoInicioFogos = millis();
+    centroX = random(1, 4); // Escolhe um X aleatório (evita as bordas extremas)
+    centroY = random(1, 4);
     break;
   case 0x80:
     midi.sendNoteOff({note, channel}, 100);
@@ -801,7 +921,38 @@ void core1_entry()
     keyboard_loop();
     ui_update();
     resolveUI();
-    animarEspectroReal();
+    // ORQUESTRAÇÃO DAS ANIMAÇÕES NA MATRIZ DE LEDS
+    Tela telaAtual = getCurrentScreen();
+    
+    if (telaAtual == Tela::TECLADO) {
+      // Equalizador Espectral (Seu código atual)
+      animarEspectroReal();
+    } 
+    else if (telaAtual == Tela::GRAVANDO) {
+      // Círculo Vermelho Pulsante
+      animarGravacao();
+    } 
+    else if (telaAtual == Tela::MIDI) {
+      // Fogos de Artifício ao tocar teclas
+      if (fogosAtivos) {
+        animarFogos();
+      } else {
+        // Limpa a matriz rapidamente se não houver fogos ativos
+        if (millis() - ultimoUpdateMatriz > 50) {
+           matriz.clear();
+           matriz.show();
+           ultimoUpdateMatriz = millis();
+        }
+      }
+    } 
+    else {
+      // Apaga a matriz nos outros menus (Menu inicial, Som Gravado, etc)
+      if (millis() - ultimoUpdateMatriz > 200) {
+        matriz.clear();
+        matriz.show();
+        ultimoUpdateMatriz = millis();
+      }
+    }
   }
 }
 
@@ -828,7 +979,7 @@ AudioOutput updateAudio()
 
   if (!bufferMatrizPronto)
   {
-    bufferAudioMatriz[indiceBufferMatriz] = mix/4;
+    bufferAudioMatriz[indiceBufferMatriz] = mix / 4;
     indiceBufferMatriz++;
 
     if (indiceBufferMatriz >= AMOSTRAS_MATRIZ)
