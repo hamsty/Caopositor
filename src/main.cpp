@@ -94,8 +94,6 @@ ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, amostrasFFT, freqAmostra
 // Variável global que o Mozzi usará para a modulação de Pitch
 volatile float notaOriginalGravada = 60.0;
 
-
-
 const byte cabecalhoWAV[44] = {
     'R', 'I', 'F', 'F',
     0x24, 0x80, 0x00, 0x00, // Tamanho do arquivo - 8 bytes (36 + 32768 = 32804)
@@ -111,8 +109,6 @@ const byte cabecalhoWAV[44] = {
     'd', 'a', 't', 'a',
     0x00, 0x80, 0x00, 0x00 // Tamanho exato dos dados de áudio (32768 bytes)
 };
-
-
 
 char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
 int totalSamplesSD = 0;     
@@ -157,7 +153,7 @@ void analisarAmostra()
   Serial.print(" Hz | Nota MIDI: ");
   Serial.println(notaOriginalGravada);
 }
-         // Quantos ficheiros WAV foram encontrados
+
 
 // Função que varre o SD e preenche o menu
 void carregarMenuDoSD()
