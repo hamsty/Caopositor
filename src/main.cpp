@@ -20,6 +20,8 @@
 #include "pico/stdlib.h" // Biblioteca nativa do RP2040 para timers
 
 #define TAMANHO_BUFFER 32768
+#define MAX_SAMPLES_MENU 20 // Limite máximo de ficheiros para mostrar no menu
+#define PINO_MICROFONE 28
 
 struct repeating_timer timerGravacao;
 
@@ -92,6 +94,29 @@ ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, amostrasFFT, freqAmostra
 // Variável global que o Mozzi usará para a modulação de Pitch
 volatile float notaOriginalGravada = 60.0;
 
+
+
+const byte cabecalhoWAV[44] = {
+    'R', 'I', 'F', 'F',
+    0x24, 0x80, 0x00, 0x00, // Tamanho do arquivo - 8 bytes (36 + 32768 = 32804)
+    'W', 'A', 'V', 'E',
+    'f', 'm', 't', ' ',
+    0x10, 0x00, 0x00, 0x00, // Tamanho do chunk 'fmt ' (16 bytes para PCM)
+    0x01, 0x00,             // Formato do áudio (1 = PCM)
+    0x01, 0x00,             // Número de canais (1 = Mono)
+    0x00, 0x40, 0x00, 0x00, // Taxa de amostragem (16384 Hz em Little Endian)
+    0x00, 0x40, 0x00, 0x00, // Byte Rate (SampleRate * Canais * Bits/8)
+    0x01, 0x00,             // Block Align (1 byte por frame)
+    0x08, 0x00,             // Bits por amostra (8 bits)
+    'd', 'a', 't', 'a',
+    0x00, 0x80, 0x00, 0x00 // Tamanho exato dos dados de áudio (32768 bytes)
+};
+
+
+
+char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
+int totalSamplesSD = 0;     
+
 void analisarAmostra()
 {
   // Pula as primeiras 2000 amostras (0.12 segundos) para ignorar
@@ -132,28 +157,7 @@ void analisarAmostra()
   Serial.print(" Hz | Nota MIDI: ");
   Serial.println(notaOriginalGravada);
 }
-#define PINO_MICROFONE 28
-
-const byte cabecalhoWAV[44] = {
-    'R', 'I', 'F', 'F',
-    0x24, 0x80, 0x00, 0x00, // Tamanho do arquivo - 8 bytes (36 + 32768 = 32804)
-    'W', 'A', 'V', 'E',
-    'f', 'm', 't', ' ',
-    0x10, 0x00, 0x00, 0x00, // Tamanho do chunk 'fmt ' (16 bytes para PCM)
-    0x01, 0x00,             // Formato do áudio (1 = PCM)
-    0x01, 0x00,             // Número de canais (1 = Mono)
-    0x00, 0x40, 0x00, 0x00, // Taxa de amostragem (16384 Hz em Little Endian)
-    0x00, 0x40, 0x00, 0x00, // Byte Rate (SampleRate * Canais * Bits/8)
-    0x01, 0x00,             // Block Align (1 byte por frame)
-    0x08, 0x00,             // Bits por amostra (8 bits)
-    'd', 'a', 't', 'a',
-    0x00, 0x80, 0x00, 0x00 // Tamanho exato dos dados de áudio (32768 bytes)
-};
-
-#define MAX_SAMPLES_MENU 20 // Limite máximo de ficheiros para mostrar no menu
-
-char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
-int totalSamplesSD = 0;              // Quantos ficheiros WAV foram encontrados
+         // Quantos ficheiros WAV foram encontrados
 
 // Função que varre o SD e preenche o menu
 void carregarMenuDoSD()
@@ -315,7 +319,7 @@ bool rotinaDeGravacao(struct repeating_timer *t)
     {
       analisarAmostra(); // Analisa a amostra gravada para determinar a nota original
       char nomeArquivo[20];
-      snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", recordedSampleIndex++);
+      snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", ++recordedSampleIndex);
       salvarGravacaoNoSD(nomeArquivo);
       Serial.println("Gravacao finalizada, buffer cheio.");
       setCurrentScreen(Tela::SOM_GRAVADO); // Muda para a tela de som gravado
@@ -709,10 +713,10 @@ void setup()
 
   Serial.begin(115200);
 
-  while (!Serial)
-  {
-    delay(20);
-  }
+  // while (!Serial)
+  // {
+  //   delay(20);
+  // }
 
   analogReadResolution(12);
 
@@ -759,7 +763,7 @@ void setup()
 
   Serial.println("Core1 started");
 
-  add_repeating_timer_us(-61, rotinaDeGravacao, NULL, &timerGravacao);
+  add_repeating_timer_us(-200, rotinaDeGravacao, NULL, &timerGravacao);
 
   ui_init();
 }
