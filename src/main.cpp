@@ -20,7 +20,7 @@
 #include "pico/stdlib.h" // Biblioteca nativa do RP2040 para timers
 
 #define TAMANHO_BUFFER 32768
-#define MAX_SAMPLES_MENU 20 // Limite máximo de ficheiros para mostrar no menu
+#define MAX_SAMPLES_MENU 100 // Limite máximo de ficheiros para mostrar no menu
 #define PINO_MICROFONE 28
 
 struct repeating_timer timerGravacao;
@@ -77,6 +77,8 @@ const Channel channel = Channel_1;
 
 int key_old_state[56];
 
+bool i2s_enable = false;
+
 int mode = 0x01; // testando som
 
 // inicia a comunicação I2C e configura pinos do teclado
@@ -111,7 +113,7 @@ const byte cabecalhoWAV[44] = {
 };
 
 char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
-int totalSamplesSD = 0;     
+int totalSamplesSD = 0;
 
 void analisarAmostra()
 {
@@ -153,7 +155,6 @@ void analisarAmostra()
   Serial.print(" Hz | Nota MIDI: ");
   Serial.println(notaOriginalGravada);
 }
-
 
 // Função que varre o SD e preenche o menu
 void carregarMenuDoSD()
@@ -319,7 +320,7 @@ bool rotinaDeGravacao(struct repeating_timer *t)
       salvarGravacaoNoSD(nomeArquivo);
       Serial.println("Gravacao finalizada, buffer cheio.");
       setCurrentScreen(Tela::SOM_GRAVADO); // Muda para a tela de som gravado
-      ui_update(); // Atualiza a interface para refletir a mudança de tela
+      desenharSomGravado();
     }
   }
   else
@@ -333,6 +334,10 @@ void iniciarGravacao()
 {
   loadedSampleMaxIndex = 0;
   gravando = true;
+  if (i2s_enable){
+    MozziPrivate::i2s.end();
+    i2s_enable = false;
+  }
 }
 
 void keyboard_config()
@@ -641,7 +646,10 @@ void resolveUI()
     break;
   case Tela::TECLADO:
     mode = 0x01; // Modo Keyboard
-
+    if(!i2s_enable){
+      MozziPrivate::i2s.begin();
+      i2s_enable = true;
+    }
     if (getCurrentInstrumentIndex() != instrumentoAtual)
     {
       g = getCurrentInstrumentFile();
@@ -658,7 +666,8 @@ void resolveUI()
     mode = 0x02;
     break;
   case Tela::GRAVANDO:
-    iniciarGravacao();
+    if (!gravando)
+      iniciarGravacao();
     break;
   case Tela::SOM_GRAVADO:
     break;
@@ -748,6 +757,7 @@ void setup()
   }
 
   startMozzi();
+  i2s_enable = true;
 
   Serial.println("Mozzi Started");
 
@@ -759,7 +769,7 @@ void setup()
 
   Serial.println("Core1 started");
 
-  add_repeating_timer_us(-200, rotinaDeGravacao, NULL, &timerGravacao);
+  add_repeating_timer_us(-61, rotinaDeGravacao, NULL, &timerGravacao);
 
   ui_init();
 }

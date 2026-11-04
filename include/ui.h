@@ -30,4 +30,6 @@ void setInstrumentList(const char** instrumentList, int quantidade);
 
 void setCurrentScreen(Tela novaTela);
 
+void desenharSomGravado();
+
 #endif
