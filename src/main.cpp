@@ -19,9 +19,17 @@
 
 #include "pico/stdlib.h" // Biblioteca nativa do RP2040 para timers
 
+#include <Adafruit_NeoPixel.h>
+
+#define PINO_MATRIZ 7 // Pino padrão da matriz 5x5 na BitDogLab
+#define NUM_LEDS 25
+
 #define TAMANHO_BUFFER 32768
 #define MAX_SAMPLES_MENU 100 // Limite máximo de ficheiros para mostrar no menu
 #define PINO_MICROFONE 28
+#define NUM_VOZES 10
+
+Adafruit_NeoPixel matriz = Adafruit_NeoPixel(NUM_LEDS, PINO_MATRIZ, NEO_GRB + NEO_KHZ800);
 
 struct repeating_timer timerGravacao;
 
@@ -46,7 +54,7 @@ USBMIDI_Interface midi;
 
 volatile byte volumeMestre = 255;
 
-Sample<TAMANHO_BUFFER, AUDIO_RATE> vozes[10]{
+Sample<TAMANHO_BUFFER, AUDIO_RATE> vozes[NUM_VOZES]{
     Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
     Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
     Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
@@ -57,7 +65,7 @@ Sample<TAMANHO_BUFFER, AUDIO_RATE> vozes[10]{
     Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample)};
 
 // // envelope generator
-ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelopes[10]{
+ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelopes[NUM_VOZES]{
     ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
     ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
     ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
@@ -114,6 +122,112 @@ const byte cabecalhoWAV[44] = {
 
 char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
 int totalSamplesSD = 0;
+
+unsigned long ultimoUpdateMatriz = 0;
+
+#define AMOSTRAS_MATRIZ 256
+
+// Arrays para a FFT em tempo real dos LEDs
+float vRealMatriz[AMOSTRAS_MATRIZ];
+float vImagMatriz[AMOSTRAS_MATRIZ];
+ArduinoFFT<float> FFTMatriz = ArduinoFFT<float>(vRealMatriz, vImagMatriz, AMOSTRAS_MATRIZ, 16384.0);
+
+volatile int bufferAudioMatriz[AMOSTRAS_MATRIZ];
+volatile int indiceBufferMatriz = 0;
+volatile bool bufferMatrizPronto = false;
+
+int getLedIndex(int x, int y)
+{
+  // Invertemos a lógica: o y=0 agora mapeia para a base física da placa
+  int linhaFisica = y;
+
+  if (linhaFisica % 2 == 0)
+  {
+    return (linhaFisica * 5) + (4 - x); // Ziguezague para a esquerda
+  }
+  else
+  {
+    return (linhaFisica * 5) + x; // Ziguezague para a direita
+  }
+}
+
+void animarEspectroReal() {
+  if (!bufferMatrizPronto) return;
+
+  long mediaDC = 0;
+  for (int i = 0; i < AMOSTRAS_MATRIZ; i++) {
+    mediaDC += bufferAudioMatriz[i];
+  }
+  mediaDC /= AMOSTRAS_MATRIZ;
+
+  // Carrega o áudio removendo o DC offset
+  for (int i = 0; i < AMOSTRAS_MATRIZ; i++) {
+    vRealMatriz[i] = (float)(bufferAudioMatriz[i] - mediaDC);
+    vImagMatriz[i] = 0.0;
+  }
+
+  bufferMatrizPronto = false; 
+
+  FFTMatriz.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+  FFTMatriz.compute(FFT_FORWARD);
+  FFTMatriz.complexToMagnitude();
+
+  float picos[5] = {0, 0, 0, 0, 0};
+
+  for (int i = 1; i < (AMOSTRAS_MATRIZ / 2); i++) {
+    int col = 0;
+    if (i <= 3)       col = 0; // Graves
+    else if (i <= 8)  col = 1; // Médios-Graves
+    else if (i <= 18) col = 2; // Médios
+    else if (i <= 40) col = 3; // Médios-Agudos
+    else              col = 4; // Agudos
+
+    // Guarda apenas o valor mais alto daquela coluna
+    if (vRealMatriz[i] > picos[col]) {
+      picos[col] = vRealMatriz[i];
+    }
+  }
+
+  matriz.clear();
+
+  float limiteMinimo = 500.0;  // Valores abaixo disso ficam com 0 LEDs (Aumente se tiver ruído "fantasma")
+  float limiteMaximo = 300000.0; // Valores acima disso acendem os 5 LEDs (Diminua se nunca chegar no topo)
+
+  float logMin = log10(limiteMinimo);
+  float logMax = log10(limiteMaximo);
+
+  for (int col = 0; col < 5; col++) {
+    int intensidade = 0;
+
+    if (picos[col] > limiteMinimo) {
+      float meuLog = log10(picos[col]);
+      
+      // Trava de segurança para não ultrapassar o máximo
+      if (meuLog > logMax) meuLog = logMax;
+
+      // Regra de três para espalhar o volume certinho de 1 a 5 LEDs
+      intensidade = (int)(((meuLog - logMin) / (logMax - logMin)) * 5.0) + 1;
+    }
+
+    // Trava de limites finais da matriz
+    if (intensidade > 5) intensidade = 5; 
+    if (intensidade < 0) intensidade = 0; 
+
+    // Acende os LEDs
+    for (int y = 0; y < intensidade; y++) {
+      int indice = getLedIndex(col, y); 
+      
+      uint32_t cor;
+      if (y < 2) cor = matriz.Color(0, 5, 0);       // Verde
+      else if (y < 4) cor = matriz.Color(5, 5, 0); // Amarelo
+      else cor = matriz.Color(5, 0, 0);             // Vermelho
+
+      matriz.setPixelColor(indice, cor);
+    }
+  }
+
+  matriz.show();
+}
 
 void analisarAmostra()
 {
@@ -334,7 +448,8 @@ void iniciarGravacao()
 {
   loadedSampleMaxIndex = 0;
   gravando = true;
-  if (i2s_enable){
+  if (i2s_enable)
+  {
     MozziPrivate::i2s.end();
     i2s_enable = false;
   }
@@ -646,7 +761,8 @@ void resolveUI()
     break;
   case Tela::TECLADO:
     mode = 0x01; // Modo Keyboard
-    if(!i2s_enable){
+    if (!i2s_enable)
+    {
       MozziPrivate::i2s.begin();
       i2s_enable = true;
     }
@@ -685,6 +801,7 @@ void core1_entry()
     keyboard_loop();
     ui_update();
     resolveUI();
+    animarEspectroReal();
   }
 }
 
@@ -709,6 +826,18 @@ AudioOutput updateAudio()
 
   mix = (mix * volumeMestre) >> 8;
 
+  if (!bufferMatrizPronto)
+  {
+    bufferAudioMatriz[indiceBufferMatriz] = mix/4;
+    indiceBufferMatriz++;
+
+    if (indiceBufferMatriz >= AMOSTRAS_MATRIZ)
+    {
+      bufferMatrizPronto = true; // Avisa o Core 0 que tem áudio fresco
+      indiceBufferMatriz = 0;
+    }
+  }
+
   return MonoOutput::from16Bit(mix / 4);
 }
 
@@ -717,11 +846,6 @@ void setup()
 {
 
   Serial.begin(115200);
-
-  // while (!Serial)
-  // {
-  //   delay(20);
-  // }
 
   analogReadResolution(12);
 
@@ -772,6 +896,9 @@ void setup()
   add_repeating_timer_us(-61, rotinaDeGravacao, NULL, &timerGravacao);
 
   ui_init();
+
+  matriz.begin();
+  matriz.show();
 }
 
 // Loop do núcleo 0
