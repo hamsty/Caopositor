@@ -20,21 +20,9 @@ static int instrumentoSelecionado = 0;
 static int instrumentoAtivo = 0;
 static bool instrumentoConfirmado = false;
 
-static const char* instrumentos[] = {
-    "Gram Piano",
-    "Yogurt Sound",
-    "Som Personalizado 1"
-};
+static const char **instrumentos;
 
-enum class Tela {
-    MENU,
-    MIDI,
-    TECLADO,
-    GRAVAR,
-    GRAVANDO,
-    SOM_GRAVADO,
-    EDITAR_TECLADO
-};
+static char instrumentFile[32];
 
 static Tela telaAtual=Tela::MENU;
 
@@ -50,8 +38,16 @@ static bool botaoAPressionadoAntes=false;
 static const char* opcoes[] = {
     "Modo MIDI",
     "Modo Teclado",
-    "Gravar Sons"
+    "Gravar Sons",
+    "Compor Música"
 };
+
+int list_offset = 0;
+
+int keyboard_menu_up = 0;
+int keyboard_menu_down = 2;
+
+int quantidadeInstrumentos = 0;
 
 //som selecionado para atribuir a uma tecla
 static int somParaEditar = 0;
@@ -66,11 +62,6 @@ static int ultimaTeclaAtribuida = -1;
 //evento pendente para processar na interface
 static int teclaPendente = -1;
 
-//exemplos temporarios de sons
-static const char* sonsGravados[] = {
-    "Som 1 - Do 4",
-    "Som 2 - Fa 5"
-};
 
 static const int quantidadeSons = 2;
 
@@ -90,6 +81,25 @@ bool ui_init() {
     }
 
     return true;
+}
+
+void setInstrumentList(const char** instrumentList, int quantidade) {
+    instrumentos = instrumentList;
+    quantidadeInstrumentos = quantidade;
+}
+
+Tela getCurrentScreen () {
+    return telaAtual;
+}
+
+int getCurrentInstrumentIndex() {
+    return instrumentoAtivo;
+}
+
+const char*  getCurrentInstrumentFile() {
+    sprintf(instrumentFile, "%s.wav", instrumentos[instrumentoAtivo]);
+
+    return instrumentFile;
 }
 
 void ui_desenharMenu() {
@@ -140,14 +150,14 @@ void desenharModoTeclado() {
     for (int i=0; i<3; i++) {
         int y = 24+i*12;
 
-        if (i == instrumentoSelecionado) {
+        if (i+list_offset == instrumentoSelecionado) {
             display.setDrawColor(1);
             display.drawBox(0, y - 10, 128, 12);
             display.setDrawColor(0);
         } else {
             display.setDrawColor(1);
         }
-        display.drawStr(4, y, instrumentos[i]);
+        display.drawStr(4, y, instrumentos[i+list_offset]);
     }
 
     display.setDrawColor(1);
@@ -188,7 +198,6 @@ void desenharGravando() {
     display.drawStr(30, 38, "GRAVANDO...");
 
     display.setFont(u8g2_font_5x7_tf);
-    display.drawStr(10, 62, "A: Parar  B: Cancelar");
 
     display.sendBuffer();
 }
@@ -206,57 +215,61 @@ void desenharSomGravado() {
     display.drawHLine(0, 44, 128);
 
     display.drawStr(5, 53, "A: Gravar outro");
-    display.drawStr(5, 62, "B: Editar teclado");
+    display.drawStr(5, 62, "B: Voltar ao menu");
 
     display.sendBuffer();
 }
 
-
-void desenharEditarTeclado() {
-    display.clearBuffer();
-    display.setDrawColor(1);
-    display.setFont(u8g2_font_6x10_tf);
-
-    display.drawStr(20, 10, "EDITAR TECLADO");
-    display.drawHLine(0, 14, 128);
-
-    //lista de sons
-    for (int i=0; i<quantidadeSons; i++) {
-        int y = 27+i*13;
-
-        if (i == somParaEditar) {
-            display.setDrawColor(1);
-            display.drawBox(0, y-10, 128, 12);
-            display.setDrawColor(0);
-        } else {
-            display.setDrawColor(1);
-        }
-
-        display.drawStr(5, y, sonsGravados[i]);
-    }
-
-    display.setDrawColor(1);
-    display.drawHLine(0, 45, 128);
-
-    display.setFont(u8g2_font_5x7_tf);
-
-    if (ultimaTeclaAtribuida >= 0) {
-        char mensagem[32];
-        snprintf(
-            mensagem,
-            sizeof(mensagem),
-            "Som atribuido: tecla %d",
-            ultimaTeclaAtribuida
-        );
-
-        display.drawStr(3, 54, mensagem);
-    } else {
-        display.drawStr(3, 54, "Pressione uma tecla");
-    }
-
-    display.drawStr(3, 62, "A: Voltar");
-    display.sendBuffer();
+void setCurrentScreen(Tela novaTela) {
+    telaAtual = novaTela;
 }
+
+
+// void desenharEditarTeclado() {
+//     display.clearBuffer();
+//     display.setDrawColor(1);
+//     display.setFont(u8g2_font_6x10_tf);
+
+//     display.drawStr(20, 10, "EDITAR TECLADO");
+//     display.drawHLine(0, 14, 128);
+
+//     //lista de sons
+//     for (int i=0; i<quantidadeSons; i++) {
+//         int y = 27+i*13;
+
+//         if (i == somParaEditar) {
+//             display.setDrawColor(1);
+//             display.drawBox(0, y-10, 128, 12);
+//             display.setDrawColor(0);
+//         } else {
+//             display.setDrawColor(1);
+//         }
+
+//         display.drawStr(5, y, sonsGravados[i]);
+//     }
+
+//     display.setDrawColor(1);
+//     display.drawHLine(0, 45, 128);
+
+//     display.setFont(u8g2_font_5x7_tf);
+
+//     if (ultimaTeclaAtribuida >= 0) {
+//         char mensagem[32];
+//         snprintf(
+//             mensagem,
+//             sizeof(mensagem),
+//             "Som atribuido: tecla %d",
+//             ultimaTeclaAtribuida
+//         );
+
+//         display.drawStr(3, 54, mensagem);
+//     } else {
+//         display.drawStr(3, 54, "Pressione uma tecla");
+//     }
+
+//     display.drawStr(3, 62, "A: Voltar");
+//     display.sendBuffer();
+// }
 
 void ui_update() {
 
@@ -264,11 +277,11 @@ void ui_update() {
         int tecla = teclaPendente;
         teclaPendente = -1;
 
-        if (telaAtual == Tela::EDITAR_TECLADO) {
-            mapaSons[tecla] = somParaEditar;
-            ultimaTeclaAtribuida = tecla;
-            desenharEditarTeclado();
-        }
+        // if (telaAtual == Tela::EDITAR_TECLADO) {
+        //     mapaSons[tecla] = somParaEditar;
+        //     ultimaTeclaAtribuida = tecla;
+        //     desenharEditarTeclado();
+        // }
     }
     //leitura dos botoes
     bool joystickPressionado = digitalRead(BOTAO_JOYSTICK) == LOW;
@@ -329,19 +342,19 @@ void ui_update() {
                 desenharGravarSons();
                 ultimaAcaoBotao = agora;
             }
-            else if (telaAtual == Tela::EDITAR_TECLADO) {
-                telaAtual = Tela::SOM_GRAVADO;
-                desenharSomGravado();
-                ultimaAcaoBotao = agora;
-            }
+            // else if (telaAtual == Tela::EDITAR_TECLADO) {
+            //     telaAtual = Tela::SOM_GRAVADO;
+            //     desenharSomGravado();
+            //     ultimaAcaoBotao = agora;
+            // }
         }
 
         if (botaoBPressionado && !botaoBPressionadoAntes && telaAtual != Tela::MENU) {
 
-            if (telaAtual == Tela::SOM_GRAVADO) {
-                telaAtual = Tela::EDITAR_TECLADO;
-                desenharEditarTeclado();
-            } else {
+            if (telaAtual != Tela::SOM_GRAVADO) {
+            //     telaAtual = Tela::EDITAR_TECLADO;
+            //     desenharEditarTeclado();
+            // } else {
                 telaAtual = Tela::MENU;
                 ui_desenharMenu();
             }
@@ -353,7 +366,7 @@ void ui_update() {
         botaoAPressionadoAntes = botaoAPressionado;
 
         //permitir navegacao no menu principal e na selecao de instrumentos
-        if (telaAtual != Tela::MENU && telaAtual != Tela::TECLADO && telaAtual != Tela::EDITAR_TECLADO) {
+        if (telaAtual != Tela::MENU && telaAtual != Tela::TECLADO){ //&& telaAtual != Tela::EDITAR_TECLADO) {
             return;
         }
 
@@ -377,20 +390,30 @@ void ui_update() {
         if (valorY<1000) {
 
             if (telaAtual == Tela::MENU) {
-                opcaoSelecionada = (opcaoSelecionada + 1) % 3;
+                opcaoSelecionada = (opcaoSelecionada + 1) % 4;
                 ui_desenharMenu();
             }
             else if (telaAtual == Tela::TECLADO) {
-                instrumentoSelecionado = (instrumentoSelecionado + 1) % 3;
+                instrumentoSelecionado = instrumentoSelecionado < quantidadeInstrumentos - 1 ? instrumentoSelecionado + 1 : instrumentoSelecionado;
+                if( instrumentoSelecionado > keyboard_menu_up) {
+                    list_offset++;
+                    keyboard_menu_up++;
+                    keyboard_menu_down++;
+                }
+                if(instrumentoSelecionado < keyboard_menu_down) {
+                    list_offset--;
+                    keyboard_menu_up--;
+                    keyboard_menu_down--;
+                }
 
                 instrumentoConfirmado = false;
                 desenharModoTeclado();
             }
-            else if (telaAtual == Tela::EDITAR_TECLADO) {
-                somParaEditar = (somParaEditar + 1) % quantidadeSons;
+            // else if (telaAtual == Tela::EDITAR_TECLADO) {
+            //     somParaEditar = (somParaEditar + 1) % quantidadeSons;
 
-                desenharEditarTeclado();
-            }
+            //     desenharEditarTeclado();
+            // }
 
             joystickLiberado = false;
             ultimoMovimento = millis();
@@ -405,29 +428,29 @@ void ui_update() {
                 ui_desenharMenu();
             }
             else if (telaAtual == Tela::TECLADO) {
-                instrumentoSelecionado = (instrumentoSelecionado + 2) % 3;
+                instrumentoSelecionado = instrumentoSelecionado > 0 ? instrumentoSelecionado - 1 : instrumentoSelecionado;
 
                 instrumentoConfirmado = false;
                 desenharModoTeclado();
             }
-            else if (telaAtual == Tela::EDITAR_TECLADO) {
-                somParaEditar = (somParaEditar + quantidadeSons - 1)
-                    % quantidadeSons;
+            // // else if (telaAtual == Tela::EDITAR_TECLADO) {
+            //     somParaEditar = (somParaEditar + quantidadeSons - 1)
+            //         % quantidadeSons;
 
-                desenharEditarTeclado();
-            }
+            //     desenharEditarTeclado();
+            // }
             joystickLiberado = false;
             ultimoMovimento = millis();
         }
     }
 }
 
-void ui_onKeyPressed(int tecla) {
-    if (telaAtual != Tela::EDITAR_TECLADO) {
-        return;
-    }
-    if (tecla < 0 || tecla >= 56) {
-        return;
-    }
-    teclaPendente = tecla;
-}
+// void ui_onKeyPressed(int tecla) {
+//     // if (telaAtual != Tela::EDITAR_TECLADO) {
+//     //     return;
+//     // }
+//     if (tecla < 0 || tecla >= 56) {
+//         return;
+//     }
+//     teclaPendente = tecla;
+// }

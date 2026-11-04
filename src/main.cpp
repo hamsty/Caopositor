@@ -7,7 +7,7 @@
 #define MOZZI_AUDIO_MODE MOZZI_OUTPUT_I2S_DAC
 #define MOZZI_CONTROL_RATE 128 // Hz, powers of 2 are most reliable
 
-#define MOZZI_I2S_PIN_BCK 14
+#define MOZZI_I2S_PIN_BCK 8
 #define MOZZI_I2S_PIN_DATA 20
 #define MOZZI_AUDIO_RATE 16384
 
@@ -25,8 +25,12 @@ struct repeating_timer timerGravacao;
 
 int8_t loadedSample[TAMANHO_BUFFER];
 
+int instrumentoAtual = -1;
+
 volatile bool gravando = false;
 volatile uint32_t loadedSampleMaxIndex = 0;
+
+int recordedSampleIndex = 0;
 
 const float FREQ_BASE = (float)AUDIO_RATE / (float)TAMANHO_BUFFER;
 
@@ -35,8 +39,8 @@ uint8_t offset = 53;
 
 Adafruit_MCP23X17 mcp;
 
-// USBMIDI_Interface midi;
-USBDebugMIDI_Interface midi(115200);
+USBMIDI_Interface midi;
+// USBDebugMIDI_Interface midi(115200);
 
 volatile byte volumeMestre = 255;
 
@@ -75,8 +79,8 @@ int mode = 0x01; // testando som
 
 // inicia a comunicação I2C e configura pinos do teclado
 
-const uint16_t amostrasFFT = 1024*2*2*2;     // Deve ser sempre uma potência de 2
-const double freqAmostragem = 16384.0; // A taxa de gravação do seu microfone
+const uint16_t amostrasFFT = 1024 * 2 * 2 * 2; // Deve ser sempre uma potência de 2
+const double freqAmostragem = 16384.0;         // A taxa de gravação do seu microfone
 
 // Arrays para cálculo dos números complexos (usamos float para poupar RAM do RP2040)
 float vReal[amostrasFFT];
@@ -146,6 +150,84 @@ const byte cabecalhoWAV[44] = {
     0x00, 0x80, 0x00, 0x00 // Tamanho exato dos dados de áudio (32768 bytes)
 };
 
+#define MAX_SAMPLES_MENU 20 // Limite máximo de ficheiros para mostrar no menu
+
+char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
+int totalSamplesSD = 0;              // Quantos ficheiros WAV foram encontrados
+
+// Função que varre o SD e preenche o menu
+void carregarMenuDoSD()
+{
+  totalSamplesSD = 0; // Zera a contagem atual
+
+  File raiz = SD.open("/");
+  if (!raiz)
+  {
+    Serial.println("Erro: Nao foi possivel abrir a raiz do SD.");
+    return;
+  }
+
+  // Passa por todos os ficheiros da pasta raiz
+  while (true)
+  {
+    File ficheiro = raiz.openNextFile();
+
+    // Se não houver mais ficheiros, sai do loop
+    if (!ficheiro)
+    {
+      break;
+    }
+
+    // Ignora se for uma pasta
+    if (!ficheiro.isDirectory())
+    {
+      String nomeFicheiro = ficheiro.name();
+      String nomeMaiusculo = nomeFicheiro;
+      nomeMaiusculo.toUpperCase(); // Facilita a verificação (.WAV ou .wav)
+
+      // Verifica se é um ficheiro de áudio WAV
+      if (nomeMaiusculo.endsWith(".WAV"))
+      {
+
+        // Corta os últimos 4 caracteres (".wav")
+        String nomeSemExtensao = nomeFicheiro.substring(0, nomeFicheiro.length() - 4);
+
+        // Guarda no array do menu se ainda houver espaço
+        if (totalSamplesSD < MAX_SAMPLES_MENU)
+        {
+          menuSamples[totalSamplesSD] = new char[nomeSemExtensao.length() + 1];
+          strcpy(menuSamples[totalSamplesSD], nomeSemExtensao.c_str());
+          totalSamplesSD++;
+        }
+        if (nomeSemExtensao.indexOf("recsample") != -1)
+        {
+          // Se o nome do ficheiro contiver "recsample", tenta extrair o índice
+          String indiceStr = nomeSemExtensao.substring(9); // Pega a parte após "recsample"
+          int indice = indiceStr.toInt();                  // Converte para inteiro
+          if (indice > recordedSampleIndex)
+          {
+            recordedSampleIndex = indice; // Atualiza o índice global se for maior
+          }
+        }
+      }
+    }
+    ficheiro.close(); // Fecha o ficheiro atual para poupar memória
+  }
+  raiz.close(); // Fecha o diretório
+
+  // Imprime o resultado no Monitor Serial para teste
+  Serial.print("Encontrados ");
+  Serial.print(totalSamplesSD);
+  Serial.println(" samples WAV no SD:");
+
+  for (int i = 0; i < totalSamplesSD; i++)
+  {
+    Serial.print(i + 1);
+    Serial.print("- ");
+    Serial.println(menuSamples[i]);
+  }
+}
+
 void salvarGravacaoNoSD(const char *nomeArquivo)
 {
   // Remove o arquivo antigo se existir com o mesmo nome
@@ -169,6 +251,8 @@ void salvarGravacaoNoSD(const char *nomeArquivo)
 
     arquivoWav.close();
     Serial.println("Gravacao salva com sucesso no SD!");
+    carregarMenuDoSD();                                            // Atualiza o menu com o novo arquivo
+    setInstrumentList((const char **)menuSamples, totalSamplesSD); // Atualiza a lista de instrumentos com os nomes do SD
   }
   else
   {
@@ -230,8 +314,12 @@ bool rotinaDeGravacao(struct repeating_timer *t)
     if (loadedSampleMaxIndex == TAMANHO_BUFFER)
     {
       analisarAmostra(); // Analisa a amostra gravada para determinar a nota original
-      salvarGravacaoNoSD("gravacao.wav");
+      char nomeArquivo[20];
+      snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", recordedSampleIndex++);
+      salvarGravacaoNoSD(nomeArquivo);
       Serial.println("Gravacao finalizada, buffer cheio.");
+      setCurrentScreen(Tela::SOM_GRAVADO); // Muda para a tela de som gravado
+      ui_update(); // Atualiza a interface para refletir a mudança de tela
     }
   }
   else
@@ -431,16 +519,16 @@ void carregarSampleDoSD(const char *nomeArquivo)
   }
 }
 
-//escaneia matriz do teclado para saber qual tecla foi pressionada
+// escaneia matriz do teclado para saber qual tecla foi pressionada
 void keyboard_loop()
 {
-  for (int i=0; i<7; i++)
+  for (int i = 0; i < 7; i++)
   {
-    mcp.digitalWrite(i+8, LOW);
+    mcp.digitalWrite(i + 8, LOW);
     delayMicroseconds(2);
-    for (int j=0; j<8; j++)
+    for (int j = 0; j < 8; j++)
     {
-      uint8_t key = i*8 + (7-j);
+      uint8_t key = i * 8 + (7 - j);
       int key_state = mcp.digitalRead(j);
       if (key_state != key_old_state[key])
       {
@@ -540,6 +628,43 @@ void test_spi()
   }
 }
 
+void resolveUI()
+{
+  Tela telaAtual = getCurrentScreen();
+  const char *g = nullptr;
+  uint32_t start_time = 0;
+
+  switch (telaAtual)
+  {
+  case Tela::MENU:
+    mode = 0x04;
+    break;
+  case Tela::TECLADO:
+    mode = 0x01; // Modo Keyboard
+
+    if (getCurrentInstrumentIndex() != instrumentoAtual)
+    {
+      g = getCurrentInstrumentFile();
+      Serial.print("Carregando sample: ");
+      Serial.println(g);
+      carregarSampleDoSD(g);
+      instrumentoAtual = getCurrentInstrumentIndex();
+    }
+    break;
+  case Tela::MIDI:
+    mode = 0x00; // Modo MIDI
+    break;
+  case Tela::GRAVAR:
+    mode = 0x02;
+    break;
+  case Tela::GRAVANDO:
+    iniciarGravacao();
+    break;
+  case Tela::SOM_GRAVADO:
+    break;
+  }
+}
+
 // Loop do núcleo 1
 void core1_entry()
 {
@@ -550,27 +675,7 @@ void core1_entry()
     midi.update();
     keyboard_loop();
     ui_update();
-    // Olha se o botão A foi pressionado e muda o sample carregado no buffer global
-    if (digitalRead(5) == LOW)
-    {
-      carregarSampleDoSD("yogurt.wav");
-      delay(50); // Debounce para evitar múltiplas leituras rápidas
-    }
-    // olha se o botão B foi pressionado e muda o sample carregado no buffer global
-    if (digitalRead(6) == LOW)
-    {
-      carregarSampleDoSD("grampiano.wav");
-      delayMicroseconds(20);
-    }
-    // Botão C inicia a gravação do microfone no buffer global
-    if (digitalRead(22) == LOW)
-    {
-      uint32_t start_time = millis();
-      while (millis() - start_time < 300);
-      iniciarGravacao();
-      start_time = millis();
-      while (millis() - start_time < 50);
-    }
+    resolveUI();
   }
 }
 
@@ -615,10 +720,6 @@ void setup()
 
   Serial.println("MIDI Started");
 
-  pinMode(5, INPUT_PULLUP);  // botao A
-  pinMode(6, INPUT_PULLUP);  // botao B
-  pinMode(22, INPUT_PULLUP); // botao C
-
   pinMode(SS, OUTPUT);
   digitalWrite(SS, HIGH);
 
@@ -635,7 +736,8 @@ void setup()
   else
 
   {
-
+    carregarMenuDoSD();
+    setInstrumentList((const char **)menuSamples, totalSamplesSD); // Inicializa a lista de instrumentos com os nomes do SD
     Serial.println("SD card initialized.");
   }
 
