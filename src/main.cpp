@@ -1,1059 +1,171 @@
 #include <Arduino.h>
-#include <Adafruit_MCP23X17.h>
-#include <Control_Surface.h>
-#include <Wire.h>
 #include <pico/multicore.h>
-#include <SD.h>
-#define MOZZI_AUDIO_MODE MOZZI_OUTPUT_I2S_DAC
-#define MOZZI_CONTROL_RATE 128 // Hz, powers of 2 are most reliable
 
-#define MOZZI_I2S_PIN_BCK 8
-#define MOZZI_I2S_PIN_DATA 20
-#define MOZZI_AUDIO_RATE 16384
-
-#include <Mozzi.h>
-#include <Sample.h>
-#include <mozzi_midi.h>
-#include <ADSR.h>
-#include <arduinoFFT.h>
-
-#include "pico/stdlib.h" // Biblioteca nativa do RP2040 para timers
-
-#include <Adafruit_NeoPixel.h>
-
-#define PINO_MATRIZ 7 // Pino padrão da matriz 5x5 na BitDogLab
-#define NUM_LEDS 25
-
-#define TAMANHO_BUFFER 32768
-#define MAX_SAMPLES_MENU 100 // Limite máximo de ficheiros para mostrar no menu
-#define PINO_MICROFONE 28
-#define NUM_VOZES 10
-
-Adafruit_NeoPixel matriz = Adafruit_NeoPixel(NUM_LEDS, PINO_MATRIZ, NEO_GRB + NEO_KHZ800);
-
-struct repeating_timer timerGravacao;
-
-int8_t loadedSample[TAMANHO_BUFFER];
-
-int instrumentoAtual = -1;
-
-volatile bool gravando = false;
-volatile uint32_t loadedSampleMaxIndex = 0;
-
-int recordedSampleIndex = 0;
-
-const float FREQ_BASE = (float)AUDIO_RATE / (float)TAMANHO_BUFFER;
-
-uint8_t offset = 53;
+#include "config.h"
+#include "app_types.h"
+#include "audio_engine.h"
+#include "pitch_detector.h"
+#include "storage.h"
+#include "recorder.h"
+#include "keyboard.h"
+#include "midi_controller.h"
+#include "led_matrix.h"
 #include "ui.h"
 
-Adafruit_MCP23X17 mcp;
+static int instrumentoAtual = -1;
+static int mode = 0x01; // testando som
 
-USBMIDI_Interface midi;
-// USBDebugMIDI_Interface midi(115200);
-
-volatile byte volumeMestre = 255;
-
-Sample<TAMANHO_BUFFER, AUDIO_RATE> vozes[NUM_VOZES]{
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample),
-    Sample<TAMANHO_BUFFER, AUDIO_RATE>(loadedSample)};
-
-// // envelope generator
-ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE> envelopes[NUM_VOZES]{
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>(),
-    ADSR<MOZZI_CONTROL_RATE, MOZZI_AUDIO_RATE>()};
-
-bool vozes_ativas[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-
-uint8_t vozes_nota[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-
-const Channel channel = Channel_1;
-
-int key_old_state[56];
-
-bool i2s_enable = false;
-
-int mode = 0x01; // testando som
-
-// inicia a comunicação I2C e configura pinos do teclado
-
-const uint16_t amostrasFFT = 1024 * 2 * 2 * 2; // Deve ser sempre uma potência de 2
-const double freqAmostragem = 16384.0;         // A taxa de gravação do seu microfone
-
-// Arrays para cálculo dos números complexos (usamos float para poupar RAM do RP2040)
-float vReal[amostrasFFT];
-float vImag[amostrasFFT];
-
-// Instancia o objeto FFT
-ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, amostrasFFT, freqAmostragem);
-
-// Variável global que o Mozzi usará para a modulação de Pitch
-volatile float notaOriginalGravada = 60.0;
-
-const byte cabecalhoWAV[44] = {
-    'R', 'I', 'F', 'F',
-    0x24, 0x80, 0x00, 0x00, // Tamanho do arquivo - 8 bytes (36 + 32768 = 32804)
-    'W', 'A', 'V', 'E',
-    'f', 'm', 't', ' ',
-    0x10, 0x00, 0x00, 0x00, // Tamanho do chunk 'fmt ' (16 bytes para PCM)
-    0x01, 0x00,             // Formato do áudio (1 = PCM)
-    0x01, 0x00,             // Número de canais (1 = Mono)
-    0x00, 0x40, 0x00, 0x00, // Taxa de amostragem (16384 Hz em Little Endian)
-    0x00, 0x40, 0x00, 0x00, // Byte Rate (SampleRate * Canais * Bits/8)
-    0x01, 0x00,             // Block Align (1 byte por frame)
-    0x08, 0x00,             // Bits por amostra (8 bits)
-    'd', 'a', 't', 'a',
-    0x00, 0x80, 0x00, 0x00 // Tamanho exato dos dados de áudio (32768 bytes)
-};
-
-char *menuSamples[MAX_SAMPLES_MENU]; // Array para guardar os nomes
-int totalSamplesSD = 0;
-
-unsigned long ultimoUpdateMatriz = 0;
-
-#define AMOSTRAS_MATRIZ 256
-
-// Arrays para a FFT em tempo real dos LEDs
-float vRealMatriz[AMOSTRAS_MATRIZ];
-float vImagMatriz[AMOSTRAS_MATRIZ];
-ArduinoFFT<float> FFTMatriz = ArduinoFFT<float>(vRealMatriz, vImagMatriz, AMOSTRAS_MATRIZ, 16384.0);
-
-volatile int bufferAudioMatriz[AMOSTRAS_MATRIZ];
-volatile int indiceBufferMatriz = 0;
-volatile bool bufferMatrizPronto = false;
-
-volatile bool fogosAtivos = false;
-unsigned long tempoInicioFogos = 0;
-int centroX = 2, centroY = 2;
-
-int getLedIndex(int x, int y)
+static void onRecordingFinished()
 {
-  // Invertemos a lógica: o y=0 agora mapeia para a base física da placa
-  int linhaFisica = y;
+  Serial.println("Gravacao finalizada, buffer cheio.");
+  setCurrentScreen(Tela::SOM_GRAVADO);
+  desenharSomGravado();
 
-  if (linhaFisica % 2 == 0)
+  float notaDetectada = pitch_detect_midi_note(audio_get_sample_buffer());
+  audio_set_base_midi_note(notaDetectada);
+
+  char nomeArquivo[20];
+  snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", storage_next_recorded_index());
+  if (storage_save_wav(nomeArquivo, audio_get_sample_buffer(), TAMANHO_BUFFER))
   {
-    return (linhaFisica * 5) + (4 - x); // Ziguezague para a esquerda
-  }
-  else
-  {
-    return (linhaFisica * 5) + x; // Ziguezague para a direita
+    setInstrumentList(storage_get_sample_list(), storage_get_sample_count());
   }
 }
 
-void animarGravacao() {
-  if (millis() - ultimoUpdateMatriz < 50) return; // Atualiza a 20 FPS
-  ultimoUpdateMatriz = millis();
-  
-  matriz.clear();
-
-  // 1. Calcula o progresso exato da gravação (de 0.0 a 1.0)
-  float progresso = (float)loadedSampleMaxIndex / TAMANHO_BUFFER;
-  
-  // O raio máximo num ecrã 5x5 (distância em cruz do centro até a ponta) é 4
-  int raioAtual = (int)(progresso * 4.0); 
-
-  // Efeito extra: Faz o anel mais externo (que está a crescer) piscar rapidamente 
-  float pulsoDaBorda = (sin(millis() / 80.0) + 1.0) / 2.0;
-
-  for (int x = 0; x < 5; x++) {
-    for (int y = 0; y < 5; y++) {
-      
-      // Calcula a distância geométrica do LED até ao centro (x=2, y=2)
-      int distancia = abs(x - 2) + abs(y - 2);
-      
-      // Acende os LEDs que já foram alcançados pelo progresso
-      if (distancia <= raioAtual) {
-        
-        int brilho = 3; // Brilho bem fraco e fixo para o "passado" da gravação
-        
-        // Se for o LED do momento exato da expansão, aplica o efeito de pulsar (Máximo 10)
-        if (distancia == raioAtual) {
-          brilho = (int)(pulsoDaBorda * 10.0);
-          if (brilho < 1) brilho = 1; // Não deixa apagar totalmente
-        }
-
-        matriz.setPixelColor(getLedIndex(x, y), matriz.Color(brilho, 0, 0));
-      }
-    }
-  }
-
-  matriz.show();
-}
-
-void animarFogos() {
-  if (!fogosAtivos) return;
-
-  if (millis() - ultimoUpdateMatriz < 50) return;
-  ultimoUpdateMatriz = millis();
-
-  unsigned long tempoDecorrido = millis() - tempoInicioFogos;
-  matriz.clear();
-
-  if (tempoDecorrido < 100) {
-    // Fase 1: Semente brilhante no centro (Luz branca/amarelada)
-    matriz.setPixelColor(getLedIndex(centroX, centroY), matriz.Color(10, 10, 10));
-  } 
-  else if (tempoDecorrido < 300) {
-    // Fase 2: Explosão adjacente (Cores aleatórias)
-    uint32_t cor = matriz.Color(random(2, 10), random(2, 10), random(2, 10));
-    for(int i = -1; i <= 1; i++) {
-      for(int j = -1; j <= 1; j++) {
-        if (i == 0 && j == 0) continue; // Pula o centro
-        int nx = centroX + i;
-        int ny = centroY + j;
-        // Verifica os limites da matriz antes de acender
-        if(nx >= 0 && nx < 5 && ny >= 0 && ny < 5) {
-          matriz.setPixelColor(getLedIndex(nx, ny), cor);
-        }
-      }
-    }
-  } 
-  else if (tempoDecorrido < 500) {
-    // Fase 3: Dissipação nas pontas (Brilho fraco)
-    uint32_t cor = matriz.Color(random(1, 5), random(1, 5), random(1, 5));
-    int posicoes[4][2] = {{centroX-2, centroY}, {centroX+2, centroY}, {centroX, centroY-2}, {centroX, centroY+2}};
-    
-    for(int i = 0; i < 4; i++) {
-      int nx = posicoes[i][0];
-      int ny = posicoes[i][1];
-      if (nx >= 0 && nx < 5 && ny >= 0 && ny < 5) {
-         matriz.setPixelColor(getLedIndex(nx, ny), cor);
-      }
-    }
-  } 
-  else {
-    // Fase 4: Fim da animação
-    fogosAtivos = false;
-  }
-  
-  matriz.show();
-}
-
-
-
-void animarEspectroReal()
-{
-  if (!bufferMatrizPronto)
-    return;
-
-  long mediaDC = 0;
-  for (int i = 0; i < AMOSTRAS_MATRIZ; i++)
-  {
-    mediaDC += bufferAudioMatriz[i];
-  }
-  mediaDC /= AMOSTRAS_MATRIZ;
-
-  // Carrega o áudio removendo o DC offset
-  for (int i = 0; i < AMOSTRAS_MATRIZ; i++)
-  {
-    vRealMatriz[i] = (float)(bufferAudioMatriz[i] - mediaDC);
-    vImagMatriz[i] = 0.0;
-  }
-
-  bufferMatrizPronto = false;
-
-  FFTMatriz.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-  FFTMatriz.compute(FFT_FORWARD);
-  FFTMatriz.complexToMagnitude();
-
-  float picos[5] = {0, 0, 0, 0, 0};
-
-  for (int i = 1; i < (AMOSTRAS_MATRIZ / 2); i++)
-  {
-    int col = 0;
-    if (i <= 3)
-      col = 0; // Graves
-    else if (i <= 8)
-      col = 1; // Médios-Graves
-    else if (i <= 18)
-      col = 2; // Médios
-    else if (i <= 40)
-      col = 3; // Médios-Agudos
-    else
-      col = 4; // Agudos
-
-    // Guarda apenas o valor mais alto daquela coluna
-    if (vRealMatriz[i] > picos[col])
-    {
-      picos[col] = vRealMatriz[i];
-    }
-  }
-
-  matriz.clear();
-
-  float limiteMinimo = 500.0;    // Valores abaixo disso ficam com 0 LEDs (Aumente se tiver ruído "fantasma")
-  float limiteMaximo = 300000.0; // Valores acima disso acendem os 5 LEDs (Diminua se nunca chegar no topo)
-
-  float logMin = log10(limiteMinimo);
-  float logMax = log10(limiteMaximo);
-
-  for (int col = 0; col < 5; col++)
-  {
-    int intensidade = 0;
-
-    if (picos[col] > limiteMinimo)
-    {
-      float meuLog = log10(picos[col]);
-
-      // Trava de segurança para não ultrapassar o máximo
-      if (meuLog > logMax)
-        meuLog = logMax;
-
-      // Regra de três para espalhar o volume certinho de 1 a 5 LEDs
-      intensidade = (int)(((meuLog - logMin) / (logMax - logMin)) * 5.0) + 1;
-    }
-
-    // Trava de limites finais da matriz
-    if (intensidade > 5)
-      intensidade = 5;
-    if (intensidade < 0)
-      intensidade = 0;
-
-    // Acende os LEDs
-    for (int y = 0; y < intensidade; y++)
-    {
-      int indice = getLedIndex(col, y);
-
-      uint32_t cor;
-      if (y < 2)
-        cor = matriz.Color(0, 5, 0); // Verde
-      else if (y < 4)
-        cor = matriz.Color(5, 5, 0); // Amarelo
-      else
-        cor = matriz.Color(5, 0, 0); // Vermelho
-
-      matriz.setPixelColor(indice, cor);
-    }
-  }
-
-  matriz.show();
-}
-
-void analisarAmostra()
-{
-  // Pula as primeiras 2000 amostras (0.12 segundos) para ignorar
-  // o ruído de clique do botão ou o silêncio inicial da gravação
-  int offset = 2000;
-
-  // 1. Prepara os dados
-  for (uint16_t i = 0; i < amostrasFFT; i++)
-  {
-    vReal[i] = (float)loadedSample[i + offset];
-    vImag[i] = 0.0; // A parte imaginária começa sempre em zero
-  }
-
-  // 2. Aplica a janela de Hamming para suavizar o corte e focar no centro da onda
-  FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-
-  // 3. Executa a Transformada (tempo para frequências)
-  FFT.compute(FFT_FORWARD);
-
-  // 4. Converte os resultados complexos em amplitudes legíveis
-  FFT.complexToMagnitude();
-
-  // 5. Encontra o pico dominante (frequência fundamental)
-  // A biblioteca faz uma interpolação matemática para dar precisão decimal
-  float frequenciaDetectada = FFT.majorPeak();
-
-  // 6. Filtro de segurança: se detetar ruído de fundo extremo (< 65Hz)
-  if (frequenciaDetectada < 65.0 || frequenciaDetectada > 2000.0)
-  {
-    frequenciaDetectada = 261.63; // Assume Dó Central (C4) como falha segura
-  }
-
-  // Converte a Frequência (Hz) para Nota MIDI fracionária
-  notaOriginalGravada = 69.0 + 12.0 * log2(frequenciaDetectada / 440.0);
-
-  Serial.print("FFT Frequencia Dominante: ");
-  Serial.print(frequenciaDetectada);
-  Serial.print(" Hz | Nota MIDI: ");
-  Serial.println(notaOriginalGravada);
-}
-
-// Função que varre o SD e preenche o menu
-void carregarMenuDoSD()
-{
-  totalSamplesSD = 0; // Zera a contagem atual
-
-  File raiz = SD.open("/");
-  if (!raiz)
-  {
-    Serial.println("Erro: Nao foi possivel abrir a raiz do SD.");
-    return;
-  }
-
-  // Passa por todos os ficheiros da pasta raiz
-  while (true)
-  {
-    File ficheiro = raiz.openNextFile();
-
-    // Se não houver mais ficheiros, sai do loop
-    if (!ficheiro)
-    {
-      break;
-    }
-
-    // Ignora se for uma pasta
-    if (!ficheiro.isDirectory())
-    {
-      String nomeFicheiro = ficheiro.name();
-      String nomeMaiusculo = nomeFicheiro;
-      nomeMaiusculo.toUpperCase(); // Facilita a verificação (.WAV ou .wav)
-
-      // Verifica se é um ficheiro de áudio WAV
-      if (nomeMaiusculo.endsWith(".WAV"))
-      {
-
-        // Corta os últimos 4 caracteres (".wav")
-        String nomeSemExtensao = nomeFicheiro.substring(0, nomeFicheiro.length() - 4);
-
-        // Guarda no array do menu se ainda houver espaço
-        if (totalSamplesSD < MAX_SAMPLES_MENU)
-        {
-          menuSamples[totalSamplesSD] = new char[nomeSemExtensao.length() + 1];
-          strcpy(menuSamples[totalSamplesSD], nomeSemExtensao.c_str());
-          totalSamplesSD++;
-        }
-        if (nomeSemExtensao.indexOf("recsample") != -1)
-        {
-          // Se o nome do ficheiro contiver "recsample", tenta extrair o índice
-          String indiceStr = nomeSemExtensao.substring(9); // Pega a parte após "recsample"
-          int indice = indiceStr.toInt();                  // Converte para inteiro
-          if (indice > recordedSampleIndex)
-          {
-            recordedSampleIndex = indice; // Atualiza o índice global se for maior
-          }
-        }
-      }
-    }
-    ficheiro.close(); // Fecha o ficheiro atual para poupar memória
-  }
-  raiz.close(); // Fecha o diretório
-
-  // Imprime o resultado no Monitor Serial para teste
-  Serial.print("Encontrados ");
-  Serial.print(totalSamplesSD);
-  Serial.println(" samples WAV no SD:");
-
-  for (int i = 0; i < totalSamplesSD; i++)
-  {
-    Serial.print(i + 1);
-    Serial.print("- ");
-    Serial.println(menuSamples[i]);
-  }
-}
-
-void salvarGravacaoNoSD(const char *nomeArquivo)
-{
-  // Remove o arquivo antigo se existir com o mesmo nome
-  if (SD.exists(nomeArquivo))
-  {
-    SD.remove(nomeArquivo);
-  }
-
-  File arquivoWav = SD.open(nomeArquivo, FILE_WRITE);
-  if (arquivoWav)
-  {
-    // 1. Escreve os 44 bytes do cabeçalho
-    arquivoWav.write(cabecalhoWAV, 44);
-
-    // 2. Escreve os 32768 bytes de áudio convertendo para sem sinal (WAV 8-bit padrão)
-    for (int i = 0; i < TAMANHO_BUFFER; i++)
-    {
-      byte sampleSemSinal = loadedSample[i] + 128;
-      arquivoWav.write(sampleSemSinal);
-    }
-
-    arquivoWav.close();
-    Serial.println("Gravacao salva com sucesso no SD!");
-    carregarMenuDoSD();                                            // Atualiza o menu com o novo arquivo
-    setInstrumentList((const char **)menuSamples, totalSamplesSD); // Atualiza a lista de instrumentos com os nomes do SD
-  }
-  else
-  {
-    Serial.println("Erro ao salvar arquivo no SD.");
-  }
-}
-
-void octaveUp()
-{
-  if (offset < (255 - 32))
-  {
-    offset += 12;
-    Serial.print("Octave Up! Offset: ");
-    Serial.println(offset);
-  }
-}
-
-void octaveDown()
-{
-  if (offset > 32)
-  {
-    offset -= 12;
-    Serial.print("Octave Down! Offset: ");
-    Serial.println(offset);
-  }
-}
-
-void VolumeUp()
-{
-  if (volumeMestre < 255)
-  {
-    volumeMestre += 10;
-    Serial.print("Volume Up! Volume: ");
-    Serial.println(volumeMestre);
-  }
-}
-
-void VolumeDown()
-{
-  if (volumeMestre > 10)
-  {
-    volumeMestre -= 10;
-    Serial.print("Volume Down! Volume: ");
-    Serial.println(volumeMestre);
-  }
-}
-
-bool rotinaDeGravacao(struct repeating_timer *t)
-{
-  if (gravando && loadedSampleMaxIndex < TAMANHO_BUFFER)
-  {
-
-    int leituraADC = analogRead(PINO_MICROFONE);
-
-    // Desloca 4 bits à direita (divide por 16) para ir de 12 para 8 bits, depois centraliza no zero
-    loadedSample[loadedSampleMaxIndex] = (leituraADC >> 4) - 128;
-
-    loadedSampleMaxIndex++;
-    if (loadedSampleMaxIndex == TAMANHO_BUFFER)
-    {
-      Serial.println("Gravacao finalizada, buffer cheio.");
-      setCurrentScreen(Tela::SOM_GRAVADO); // Muda para a tela de som gravado
-      desenharSomGravado();
-      analisarAmostra(); // Analisa a amostra gravada para determinar a nota original
-      char nomeArquivo[20];
-      snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", ++recordedSampleIndex);
-      salvarGravacaoNoSD(nomeArquivo);
-    }
-  }
-  else
-  {
-    gravando = false;
-  }
-  return true; // Mantém o temporizador ativo em segundo plano
-}
-
-void iniciarGravacao()
-{
-  loadedSampleMaxIndex = 0;
-  gravando = true;
-  if (i2s_enable)
-  {
-    MozziPrivate::i2s.end();
-    i2s_enable = false;
-  }
-}
-
-void keyboard_config()
-{
-  Wire1.setSDA(2);
-  Wire1.setSCL(3);
-  Wire1.begin();
-
-  pinMode(12, OUTPUT);
-  pinMode(13, OUTPUT);
-  pinMode(11, OUTPUT);
-
-  if (!mcp.begin_I2C(0x20, &Wire1))
-  {
-    Serial.println("Error.");
-
-    while (1)
-    {
-      digitalWrite(13, HIGH);
-      delay(200);
-      digitalWrite(13, LOW);
-      delay(200);
-    }
-  }
-
-  digitalWrite(12, HIGH);
-
-  mcp.pinMode(8, OUTPUT);
-  mcp.pinMode(9, OUTPUT);
-  mcp.pinMode(10, OUTPUT);
-  mcp.pinMode(11, OUTPUT);
-  mcp.pinMode(12, OUTPUT);
-  mcp.pinMode(13, OUTPUT);
-  mcp.pinMode(14, OUTPUT);
-
-  mcp.pinMode(7, INPUT_PULLUP);
-  mcp.pinMode(6, INPUT_PULLUP);
-  mcp.pinMode(5, INPUT_PULLUP);
-  mcp.pinMode(4, INPUT_PULLUP);
-  mcp.pinMode(3, INPUT_PULLUP);
-  mcp.pinMode(2, INPUT_PULLUP);
-  mcp.pinMode(1, INPUT_PULLUP);
-  mcp.pinMode(0, INPUT_PULLUP);
-
-  for (int i = 0; i < 48; i++)
-  {
-    key_old_state[i] = HIGH;
-  }
-}
-
-void midi_handle(uint8_t code, uint8_t note)
-{
-  switch (code)
-  {
-  case 0x90:
-    midi.sendNoteOn({note, channel}, 100);
-
-    fogosAtivos = true;
-    tempoInicioFogos = millis();
-    centroX = random(1, 4); // Escolhe um X aleatório (evita as bordas extremas)
-    centroY = random(1, 4);
-    break;
-  case 0x80:
-    midi.sendNoteOff({note, channel}, 100);
-    break;
-  default:
-    break;
-  }
-}
-
-void keysound_handle(uint8_t code, uint8_t note)
-{
-  switch (code)
-  {
-  case 0x90:
-    for (int i = 0; i < 10; i++)
-    {
-      if (!vozes_ativas[i])
-      {
-        // Calcula o deslocamento de tom (pitch). Assumimos 60 (Dó4) como a nota do som original gravado.
-        float multiplicador = pow(2.0, (note - notaOriginalGravada) / 12.0);
-        vozes[i].setFreq(FREQ_BASE * multiplicador);
-
-        vozes[i].start(); // Reinicia o ponteiro de leitura do sample para o início
-        envelopes[i].noteOn();
-        vozes_nota[i] = note;
-        vozes_ativas[i] = true;
-        break;
-      }
-      if (i == 9)
-      {
-        Serial.println("Todas as vozes estão ocupadas!");
-        return;
-      }
-    }
-
-    break;
-  case 0x80:
-    for (int i = 0; i < 10; i++)
-    {
-      if (vozes_ativas[i] && vozes_nota[i] == note)
-      {
-        vozes_ativas[i] = false;
-        envelopes[i].noteOff();
-        break;
-      }
-    }
-    break;
-  default:
-    break;
-  }
-}
-
-// processo que roda no núcleo 1 sempre que uma tecla for pressionada ou solta.
-void handle_keyboard_event(uint8_t code, uint8_t note)
+// Processo que roda no núcleo 1 sempre que uma tecla musical for pressionada ou solta
+static void onKeyboardNote(uint8_t code, uint8_t note)
 {
   switch (mode)
   {
   case 0x01: // Keyboard mode
-    keysound_handle(code, note);
+    audio_handle_key(code, note);
     break;
-  case 0x00: // midi mode
-    midi_handle(code, note);
+  case 0x00: // MIDI mode
+    midi_handle_key(code, note);
+    if (code == 0x90)
+    {
+      led_matrix_trigger_firework();
+    }
     break;
   default:
     break;
   }
 }
 
-uint32_t encontrarInicioDados(File &arquivo)
+static void onKeyboardControl(uint8_t key)
 {
-  arquivo.seek(0);
-  char buffer[4];
-
-  // Procura pela sequência de caracteres "data"
-  while (arquivo.available() >= 4)
+  switch (key)
   {
-    buffer[0] = arquivo.read();
-
-    if (buffer[0] == 'd')
-    {
-      buffer[1] = arquivo.read();
-      buffer[2] = arquivo.read();
-      buffer[3] = arquivo.read();
-
-      if (buffer[1] == 'a' && buffer[2] == 't' && buffer[3] == 'a')
-      {
-        // Pula os 4 bytes seguintes (que guardam o tamanho do bloco de áudio)
-        arquivo.seek(arquivo.position() + 4);
-        return arquivo.position(); // Retorna o tamanho exato do cabeçalho
-      }
-
-      // Se não for "data", volta 3 passos atrás para não saltar letras por engano
-      arquivo.seek(arquivo.position() - 3);
-    }
-  }
-  return 44; // Retorna o padrão 44 se o bloco não for encontrado
-}
-
-void carregarSampleDoSD(const char *nomeArquivo)
-{
-  File arquivoWav = SD.open(nomeArquivo);
-
-  if (arquivoWav)
-  {
-    uint32_t tamanhoCabecalho = encontrarInicioDados(arquivoWav);
-    Serial.print("Tamanho do cabecalho detetado: ");
-    Serial.println(tamanhoCabecalho);
-    arquivoWav.seek(tamanhoCabecalho); // Pula o cabeçalho padrão de 44 bytes do formato WAV
-
-    loadedSampleMaxIndex = 0; // Reinicia o índice do buffer global
-
-    // Lê os dados brutos até encher o buffer ou o arquivo acabar
-    while (arquivoWav.available() && loadedSampleMaxIndex < TAMANHO_BUFFER)
-    {
-      // Lê o byte (0 a 255) e subtrai 128 para centralizar a onda (-128 a 127)
-      loadedSample[loadedSampleMaxIndex] = arquivoWav.read() - 128;
-      loadedSampleMaxIndex++;
-    }
-
-    arquivoWav.close();
-    Serial.print("Sample carregado com sucesso: ");
-    Serial.println(nomeArquivo);
-    analisarAmostra(); // Analisa a amostra carregada para determinar a nota original
-  }
-  else
-  {
-    Serial.println("Erro ao abrir o arquivo no SD!");
+  case 40:
+    keyboard_octave_down();
+    break;
+  case 41:
+    keyboard_octave_up();
+    break;
+  case 42:
+    audio_volume_down();
+    break;
+  case 43:
+    audio_volume_up();
+    break;
+  default:
+    break;
   }
 }
 
-// escaneia matriz do teclado para saber qual tecla foi pressionada
-void keyboard_loop()
-{
-  for (int i = 0; i < 7; i++)
-  {
-    mcp.digitalWrite(i + 8, LOW);
-    delayMicroseconds(2);
-    for (int j = 0; j < 8; j++)
-    {
-      uint8_t key = i * 8 + (7 - j);
-      int key_state = mcp.digitalRead(j);
-      if (key_state != key_old_state[key])
-      {
-        key_old_state[key] = key_state;
-        if (key_old_state[key] == LOW)
-        {
-          if (key < 32)
-          {
-            handle_keyboard_event(0x90, offset + key);
-            Serial.printf("key %d pressed, %d %d \n", key, i, j);
-          }
-          else
-          {
-            switch (key)
-            {
-            case 40:
-              octaveDown();
-              break;
-            case 41:
-              octaveUp();
-              break;
-            case 42:
-              VolumeDown();
-              break;
-            case 43:
-              VolumeUp();
-              break;
-            }
-          }
-        }
-        else
-        {
-          if (key < 32)
-          {
-            handle_keyboard_event(0x80, offset + key);
-          }
-        }
-      }
-    }
-    mcp.digitalWrite(i + 8, HIGH);
-    delayMicroseconds(2);
-  }
-}
-
-void test_spi()
-{
-  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
-
-  for (int i = 0; i < 10; i++)
-  {
-    SPI.transfer(0xFF);
-  }
-
-  digitalWrite(SS, LOW); // Abaixa o CS para selecionar o cartão
-  delay(1);
-
-  char cmd0[6] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
-  for (int i = 0; i < 6; i++)
-  {
-    SPI.transfer(cmd0[i]);
-  }
-
-  // 3. Aguarda a resposta do cartão
-  char resposta = 0xFF;
-  int tentativas = 0;
-
-  // O cartão pode demorar alguns ciclos para responder, então ficamos ouvindo
-  while (resposta == 0xFF && tentativas < 100)
-  {
-    resposta = SPI.transfer(0xFF);
-    tentativas++;
-  }
-
-  digitalWrite(SS, HIGH); // Libera o cartão
-  SPI.endTransaction();
-
-  // 4. Analisa o resultado
-  Serial.print("Resposta recebida: 0x");
-  if (resposta < 16)
-    Serial.print("0");
-  Serial.println(resposta, HEX);
-
-  if (resposta == 0x01)
-  {
-    Serial.println("\n-> SUCESSO ABSOLUTO!");
-    Serial.println("O cartao SD esta se comunicando perfeitamente pelo SPI.");
-  }
-  else if (resposta == 0xFF)
-  {
-    Serial.println("\n-> FALHA: Nenhuma resposta (0xFF).");
-    Serial.println("O pino MISO (RX) nao esta recebendo nada. Verifique MISO, MOSI, SCK e VCC.");
-  }
-  else
-  {
-    Serial.println("\n-> FALHA: Resposta irreconhecivel.");
-    Serial.println("Os fios podem estar trocados ou ha muito ruido na linha.");
-  }
-}
-
-void resolveUI()
+static void resolveUI()
 {
   Tela telaAtual = getCurrentScreen();
-  const char *g = nullptr;
-  uint32_t start_time = 0;
 
   switch (telaAtual)
   {
   case Tela::MENU:
     mode = 0x04;
     break;
+
   case Tela::TECLADO:
     mode = 0x01; // Modo Keyboard
-    if (!i2s_enable)
+    if (!audio_is_i2s_enabled())
     {
-      MozziPrivate::i2s.begin();
-      i2s_enable = true;
+      audio_set_i2s_enabled(true);
     }
     if (getCurrentInstrumentIndex() != instrumentoAtual)
     {
-      g = getCurrentInstrumentFile();
+      const char *arquivo = getCurrentInstrumentFile();
       Serial.print("Carregando sample: ");
-      Serial.println(g);
-      carregarSampleDoSD(g);
+      Serial.println(arquivo);
+      if (storage_load_sample(arquivo, audio_get_sample_buffer(), recorder_get_sample_index_ptr()))
+      {
+        float notaDetectada = pitch_detect_midi_note(audio_get_sample_buffer());
+        audio_set_base_midi_note(notaDetectada);
+      }
       instrumentoAtual = getCurrentInstrumentIndex();
     }
     break;
+
   case Tela::MIDI:
     mode = 0x00; // Modo MIDI
     break;
+
   case Tela::GRAVAR:
     mode = 0x02;
     break;
+
   case Tela::GRAVANDO:
-    if (!gravando)
-      iniciarGravacao();
+    if (!recorder_is_recording())
+    {
+      recorder_start();
+    }
     break;
+
   case Tela::SOM_GRAVADO:
     break;
   }
 }
 
 // Loop do núcleo 1
-void core1_entry()
+static void core1_entry()
 {
-
   while (1)
   {
     tight_loop_contents();
-    midi.update();
+    midi_update();
     keyboard_loop();
     ui_update();
     resolveUI();
-    // ORQUESTRAÇÃO DAS ANIMAÇÕES NA MATRIZ DE LEDS
-    Tela telaAtual = getCurrentScreen();
-    
-    if (telaAtual == Tela::TECLADO) {
-      // Equalizador Espectral (Seu código atual)
-      animarEspectroReal();
-    } 
-    else if (telaAtual == Tela::GRAVANDO) {
-      // Círculo Vermelho Pulsante
-      animarGravacao();
-    } 
-    else if (telaAtual == Tela::MIDI) {
-      // Fogos de Artifício ao tocar teclas
-      if (fogosAtivos) {
-        animarFogos();
-      } else {
-        // Limpa a matriz rapidamente se não houver fogos ativos
-        if (millis() - ultimoUpdateMatriz > 50) {
-           matriz.clear();
-           matriz.show();
-           ultimoUpdateMatriz = millis();
-        }
-      }
-    } 
-    else {
-      // Apaga a matriz nos outros menus (Menu inicial, Som Gravado, etc)
-      if (millis() - ultimoUpdateMatriz > 200) {
-        matriz.clear();
-        matriz.show();
-        ultimoUpdateMatriz = millis();
-      }
-    }
+    led_matrix_update(getCurrentScreen());
   }
 }
 
-void updateControl()
-{
-  for (int i = 0; i < 10; i++)
-  {
-    envelopes[i].update();
-  }
-}
-
-AudioOutput updateAudio()
-{
-  int32_t mix = 0;
-  for (int i = 0; i < 10; i++)
-  {
-    if (vozes_ativas[i])
-    {
-      mix += (envelopes[i].next() * vozes[i].next());
-    }
-  }
-
-  mix = (mix * volumeMestre) >> 8;
-
-  if (!bufferMatrizPronto)
-  {
-    bufferAudioMatriz[indiceBufferMatriz] = mix / 4;
-    indiceBufferMatriz++;
-
-    if (indiceBufferMatriz >= AMOSTRAS_MATRIZ)
-    {
-      bufferMatrizPronto = true; // Avisa o Core 0 que tem áudio fresco
-      indiceBufferMatriz = 0;
-    }
-  }
-
-  return MonoOutput::from16Bit(mix / 4);
-}
-
-// configuração do núcleo principal
+// Configuração do núcleo principal (Core 0)
 void setup()
 {
-
   Serial.begin(115200);
-
   analogReadResolution(12);
 
-  midi.begin();
+  midi_init();
 
-  Serial.println("MIDI Started");
-
-  pinMode(SS, OUTPUT);
-  digitalWrite(SS, HIGH);
-
-  SPI.setMISO(MISO);
-  SPI.setMOSI(MOSI);
-  SPI.setSCK(SCK);
-
-  SPI.begin();
-
-  if (!SD.begin(SS, SPI))
+  if (storage_init())
   {
-    Serial.println("SD card initialization failed!");
-  }
-  else
-
-  {
-    carregarMenuDoSD();
-    setInstrumentList((const char **)menuSamples, totalSamplesSD); // Inicializa a lista de instrumentos com os nomes do SD
-    Serial.println("SD card initialized.");
+    setInstrumentList(storage_get_sample_list(), storage_get_sample_count());
   }
 
-  for (int i = 0; i < 10; i++)
-  {
-    envelopes[i].setADLevels(255, 64);
-    envelopes[i].setTimes(50, 200, 10000, 200);
-  }
+  audio_init();
 
-  startMozzi();
-  i2s_enable = true;
-
-  Serial.println("Mozzi Started");
-
-  keyboard_config();
-
-  Serial.println("Keyboard configuration done!");
+  keyboard_init(onKeyboardNote, onKeyboardControl);
 
   multicore_launch_core1(core1_entry);
-
   Serial.println("Core1 started");
 
-  add_repeating_timer_us(-61, rotinaDeGravacao, NULL, &timerGravacao);
+  recorder_init(audio_get_sample_buffer(), onRecordingFinished);
 
   ui_init();
 
-  matriz.begin();
-  matriz.show();
+  led_matrix_init();
 }
 
 // Loop do núcleo 0
 void loop()
 {
-  audioHook();
+  audio_loop();
 }

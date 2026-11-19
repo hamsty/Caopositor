@@ -1,16 +1,16 @@
-
 #include "ui.h"
+#include "config.h"
 #include <U8g2lib.h>
-#define JOYSTICK_Y 26
+
 static bool joystickLiberado = true;
 static unsigned long ultimoMovimento = 0;
 const unsigned long intervaloJoystick = 250;
 
 // biblioteca implementada para o I2C por software, para evitar conflito
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(
+static U8G2_SSD1306_128X64_NONAME_F_SW_I2C display(
     U8G2_R0,
-    15,
-    14,
+    OLED_SCL_PIN,
+    OLED_SDA_PIN,
     U8X8_PIN_NONE);
 
 static int opcaoSelecionada = 0;
@@ -25,13 +25,8 @@ static char instrumentFile[32];
 
 static Tela telaAtual = Tela::MENU;
 
-#define BOTAO_JOYSTICK 22
-
-#define BOTAO_B 6
 static bool joystickPressionadoAntes = false;
 static bool botaoBPressionadoAntes = false;
-
-#define BOTAO_A 5
 static bool botaoAPressionadoAntes = false;
 
 static const char *opcoes[] = {
@@ -40,23 +35,20 @@ static const char *opcoes[] = {
     "Gravar Sons",
     "Compor Musica"};
 
-int list_offset = 0;
-
-int keyboard_menu_up = 0;
-int keyboard_menu_down = 2;
-
-int quantidadeInstrumentos = 0;
+static int list_offset = 0;
+static int keyboard_menu_up = 0;
+static int keyboard_menu_down = 2;
+static int quantidadeInstrumentos = 0;
 
 // som selecionado para atribuir a uma tecla
 static int somParaEditar = 0;
 
 // cada posicao representa uma tecla fisica
-//-1 significa que nao existe som associado
-static int mapaSons[56] = {};
+// -1 significa que nao existe som associado
+static int mapaSons[KEYBOARD_TOTAL_KEYS] = {};
 
 // ultima tecla associada
 static int ultimaTeclaAtribuida = -1;
-
 
 static const int quantidadeSons = 2;
 
@@ -68,11 +60,11 @@ bool ui_init()
     pinMode(BOTAO_A, INPUT_PULLUP);
 
     analogReadResolution(12);
-    display.setI2CAddress(0x3C * 2);
+    display.setI2CAddress(OLED_I2C_ADDR * 2);
     display.begin();
     ui_desenharMenu();
 
-    for (int i = 0; i < 56; i++)
+    for (int i = 0; i < KEYBOARD_TOTAL_KEYS; i++)
     {
         mapaSons[i] = -1;
     }
@@ -241,10 +233,8 @@ void setCurrentScreen(Tela novaTela)
     telaAtual = novaTela;
 }
 
-
 void ui_update()
 {
-
     // leitura dos botoes
     bool joystickPressionado = digitalRead(BOTAO_JOYSTICK) == LOW;
     bool botaoBPressionado = digitalRead(BOTAO_B) == LOW;
@@ -255,11 +245,9 @@ void ui_update()
 
     if (agora - ultimaAcaoBotao >= 50)
     {
-
         // confirmar opcao no menu principal
         if (joystickPressionado && !joystickPressionadoAntes && telaAtual == Tela::MENU)
         {
-
             switch (opcaoSelecionada)
             {
             case 0:
@@ -283,7 +271,6 @@ void ui_update()
         // confirmar instrumento no Modo Teclado
         if (joystickPressionado && !joystickPressionadoAntes && telaAtual == Tela::TECLADO)
         {
-
             instrumentoAtivo = instrumentoSelecionado;
             instrumentoConfirmado = true;
             desenharModoTeclado();
@@ -293,7 +280,6 @@ void ui_update()
         // Botao A
         if (botaoAPressionado && !botaoAPressionadoAntes)
         {
-
             if (telaAtual == Tela::GRAVAR)
             {
                 telaAtual = Tela::GRAVANDO;
@@ -312,12 +298,10 @@ void ui_update()
                 desenharGravarSons();
                 ultimaAcaoBotao = agora;
             }
-
         }
 
         if (botaoBPressionado && !botaoBPressionadoAntes && telaAtual != Tela::MENU)
         {
-
             telaAtual = Tela::MENU;
             ui_desenharMenu();
             ultimaAcaoBotao = agora;
@@ -329,23 +313,20 @@ void ui_update()
 
         // permitir navegacao no menu principal e na selecao de instrumentos
         if (telaAtual != Tela::MENU && telaAtual != Tela::TECLADO)
-        { //&& telaAtual != Tela::EDITAR_TECLADO) {
+        {
             return;
         }
 
         int valorY = analogRead(JOYSTICK_Y);
 
-
-        if (millis() - ultimoMovimento <
-            intervaloJoystick)
+        if (millis() - ultimoMovimento < intervaloJoystick)
         {
             return;
         }
-        
+
         // joystick para baixo
         if (valorY < 500)
         {
-
             if (telaAtual == Tela::MENU)
             {
                 opcaoSelecionada = (opcaoSelecionada + 1) % 4;
@@ -366,18 +347,14 @@ void ui_update()
                 desenharModoTeclado();
             }
 
-
             ultimoMovimento = millis();
         }
-
         // joystick para cima
         else if (valorY > 3000)
         {
-
             if (telaAtual == Tela::MENU)
             {
                 opcaoSelecionada = (opcaoSelecionada + 2) % 4;
-
                 ui_desenharMenu();
             }
             else if (telaAtual == Tela::TECLADO)
