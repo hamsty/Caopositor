@@ -55,7 +55,7 @@ void keyboard_init(KeyNoteCallback onNote, KeyControlCallback onControl)
   mcp.pinMode(1, INPUT_PULLUP);
   mcp.pinMode(0, INPUT_PULLUP);
 
-  for (int i = 0; i < 48; i++)
+  for (int i = 0; i < KEYBOARD_TOTAL_KEYS; i++)
   {
     key_old_state[i] = HIGH;
   }

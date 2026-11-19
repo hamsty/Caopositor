@@ -17,11 +17,26 @@
 #define TAMANHO_BUFFER 32768
 #define NUM_VOZES 10
 
-// FFT para análise de pitch
-#define FFT_PITCH_SAMPLES (1024 * 2 * 2 * 2) // Deve ser sempre uma potência de 2
+// Gravação longa: reutiliza os slots 1..3 (3 * 32 KB = 96 KB = 6 segundos @ 16384 Hz)
+#define RECORD_BUFFER_SLOTS 3
+#define RECORD_MAX_SAMPLES (TAMANHO_BUFFER * RECORD_BUFFER_SLOTS)
+
+// FFT para análise de pitch (alocada sob demanda para economizar RAM)
+#define FFT_PITCH_SAMPLES 2048 // Deve ser sempre uma potência de 2
 
 // Armazenamento (SD)
-#define MAX_SAMPLES_MENU 100 // Limite máximo de ficheiros para mostrar no menu
+#define MAX_SAMPLES_MENU 100 // Limite máximo de ficheiros WAV para mostrar no menu
+#define SEQ_MAX_SONGS_MENU 32
+#define SEQ_FILENAME_LEN 32
+
+// Sequenciador estilo Mario Paint
+#define SEQ_NUM_SYMBOLS 4
+#define SEQ_MAX_STEPS 64
+#define SEQ_MAX_NOTES_PER_STEP 6
+#define SEQ_VISIBLE_STEPS 8
+#define SEQ_DEFAULT_BPM 120
+#define SEQ_MIN_BPM 60
+#define SEQ_MAX_BPM 200
 
 // Teclado (Expansor I2C MCP23017)
 #define KEYBOARD_SDA_PIN 2
@@ -30,6 +45,7 @@
 #define KEYBOARD_TOTAL_KEYS 56
 #define KEYBOARD_NOTE_KEYS 32
 #define KEYBOARD_DEFAULT_OFFSET 53
+#define KEY_COMPOSER_REST 37
 
 // LEDs de status RGB na BitDogLab
 #define LED_STATUS_G_PIN 11
@@ -42,6 +58,7 @@
 #define OLED_I2C_ADDR 0x3C
 
 #define JOYSTICK_Y 26
+#define JOYSTICK_X 27
 #define BOTAO_JOYSTICK 22
 #define BOTAO_A 5
 #define BOTAO_B 6

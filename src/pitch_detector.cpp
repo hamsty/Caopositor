@@ -1,50 +1,73 @@
 #include "pitch_detector.h"
 #include "config.h"
 #include <arduinoFFT.h>
+#include <new>
 
-static const uint16_t amostrasFFT = FFT_PITCH_SAMPLES;
-static const double freqAmostragem = (double)AUDIO_SAMPLE_RATE;
-
-// Arrays para cálculo dos números complexos (usamos float para poupar RAM do RP2040)
-static float vReal[FFT_PITCH_SAMPLES];
-static float vImag[FFT_PITCH_SAMPLES];
-
-static ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, amostrasFFT, freqAmostragem);
-
-float pitch_detect_midi_note(const int8_t *sampleBuffer)
+float pitch_detect_midi_note(const int8_t *sampleBuffer, uint32_t sampleLength)
 {
-  // Pula as primeiras 2000 amostras (0.12 segundos) para ignorar
-  // o ruído de clique do botão ou o silêncio inicial da gravação
-  int offset = 2000;
-
-  // 1. Prepara os dados
-  for (uint16_t i = 0; i < amostrasFFT; i++)
+  if (sampleBuffer == nullptr || sampleLength == 0)
   {
-    vReal[i] = (float)sampleBuffer[i + offset];
-    vImag[i] = 0.0; // A parte imaginária começa sempre em zero
+    return 60.0f;
   }
 
-  // 2. Aplica a janela de Hamming para suavizar o corte e focar no centro da onda
+  // Alocação temporária para não ocupar RAM permanentemente
+  float *vReal = new (std::nothrow) float[FFT_PITCH_SAMPLES];
+  float *vImag = new (std::nothrow) float[FFT_PITCH_SAMPLES];
+
+  if (vReal == nullptr || vImag == nullptr)
+  {
+    delete[] vReal;
+    delete[] vImag;
+    Serial.println("FFT: memoria insuficiente, assumindo C4.");
+    return 60.0f;
+  }
+
+  // Pula as primeiras 2000 amostras (~0.12s) quando o sample é longo o suficiente
+  uint32_t offset = (sampleLength >= (2000 + FFT_PITCH_SAMPLES)) ? 2000 : 0;
+
+  // Calcula DC offset para melhorar precisão em gravações de microfone
+  float mediaDC = 0.0f;
+  uint32_t validCount = 0;
+  for (uint16_t i = 0; i < FFT_PITCH_SAMPLES; i++)
+  {
+    uint32_t idx = offset + i;
+    if (idx < sampleLength)
+    {
+      mediaDC += (float)sampleBuffer[idx];
+      validCount++;
+    }
+  }
+  if (validCount > 0)
+  {
+    mediaDC /= (float)validCount;
+  }
+
+  for (uint16_t i = 0; i < FFT_PITCH_SAMPLES; i++)
+  {
+    uint32_t idx = offset + i;
+    vReal[i] = (idx < sampleLength) ? ((float)sampleBuffer[idx] - mediaDC) : 0.0f;
+    vImag[i] = 0.0f;
+  }
+
+  ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, FFT_PITCH_SAMPLES, (double)AUDIO_SAMPLE_RATE);
+
   FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
-
-  // 3. Executa a Transformada (tempo para frequências)
   FFT.compute(FFT_FORWARD);
-
-  // 4. Converte os resultados complexos em amplitudes legíveis
   FFT.complexToMagnitude();
 
-  // 5. Encontra o pico dominante (frequência fundamental)
-  // A biblioteca faz uma interpolação matemática para dar precisão decimal
   float frequenciaDetectada = FFT.majorPeak();
 
-  // 6. Filtro de segurança: se detetar ruído de fundo extremo (< 65Hz)
-  if (frequenciaDetectada < 65.0 || frequenciaDetectada > 2000.0)
+  delete[] vReal;
+  delete[] vImag;
+
+  // Filtro de segurança: se detetar ruído de fundo extremo (< 65Hz ou > 2000Hz)
+  if (frequenciaDetectada < 65.0f || frequenciaDetectada > 2000.0f)
   {
-    frequenciaDetectada = 261.63; // Assume Dó Central (C4) como falha segura
+    frequenciaDetectada = 261.63f; // Assume Dó Central (C4) como falha segura
   }
 
   // Converte a Frequência (Hz) para Nota MIDI fracionária
-  float notaOriginal = 69.0 + 12.0 * log2(frequenciaDetectada / 440.0);
+  float notaOriginal = 69.0f + 12.0f * log2f(frequenciaDetectada / 440.0f);
 
   Serial.print("FFT Frequencia Dominante: ");
   Serial.print(frequenciaDetectada);

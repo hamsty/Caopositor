@@ -10,26 +10,18 @@
 #include "keyboard.h"
 #include "midi_controller.h"
 #include "led_matrix.h"
+#include "sequencer.h"
 #include "ui.h"
 
 static int instrumentoAtual = -1;
-static int mode = 0x01; // testando som
+static int mode = 0x01; // 0x00=MIDI, 0x01=Teclado, 0x02=Gravar, 0x03=Compositor, 0x04=Menu
 
 static void onRecordingFinished()
 {
-  Serial.println("Gravacao finalizada, buffer cheio.");
-  setCurrentScreen(Tela::SOM_GRAVADO);
-  desenharSomGravado();
-
-  float notaDetectada = pitch_detect_midi_note(audio_get_sample_buffer());
-  audio_set_base_midi_note(notaDetectada);
-
-  char nomeArquivo[20];
-  snprintf(nomeArquivo, sizeof(nomeArquivo), "recsample%d.wav", storage_next_recorded_index());
-  if (storage_save_wav(nomeArquivo, audio_get_sample_buffer(), TAMANHO_BUFFER))
-  {
-    setInstrumentList(storage_get_sample_list(), storage_get_sample_count());
-  }
+  Serial.print("Gravacao finalizada. Amostras capturadas: ");
+  Serial.println(recorder_get_sample_index());
+  instrumentoAtual = -1; // Força recarga do Modo Teclado após editar/salvar
+  ui_open_recording_editor();
 }
 
 // Processo que roda no núcleo 1 sempre que uma tecla musical for pressionada ou solta
@@ -38,7 +30,11 @@ static void onKeyboardNote(uint8_t code, uint8_t note)
   switch (mode)
   {
   case 0x01: // Keyboard mode
-    audio_handle_key(code, note);
+    audio_handle_key(code, note, 0);
+    if (code == 0x90)
+    {
+      ui_on_keyboard_note_played(note);
+    }
     break;
   case 0x00: // MIDI mode
     midi_handle_key(code, note);
@@ -46,6 +42,9 @@ static void onKeyboardNote(uint8_t code, uint8_t note)
     {
       led_matrix_trigger_firework();
     }
+    break;
+  case 0x03: // Modo Compositor (Sequenciador Mario Paint)
+    ui_on_composer_piano_key(code, note);
     break;
   default:
     break;
@@ -56,6 +55,12 @@ static void onKeyboardControl(uint8_t key)
 {
   switch (key)
   {
+  case KEY_COMPOSER_REST:
+    if (mode == 0x03)
+    {
+      ui_on_composer_rest_key();
+    }
+    break;
   case 40:
     keyboard_octave_down();
     break;
@@ -89,15 +94,24 @@ static void resolveUI()
     {
       audio_set_i2s_enabled(true);
     }
-    if (getCurrentInstrumentIndex() != instrumentoAtual)
+    if (getCurrentInstrumentIndex() != instrumentoAtual && storage_get_sample_count() > 0)
     {
       const char *arquivo = getCurrentInstrumentFile();
-      Serial.print("Carregando sample: ");
-      Serial.println(arquivo);
-      if (storage_load_sample(arquivo, audio_get_sample_buffer(), recorder_get_sample_index_ptr()))
+      if (arquivo != nullptr && arquivo[0] != '\0')
       {
-        float notaDetectada = pitch_detect_midi_note(audio_get_sample_buffer());
-        audio_set_base_midi_note(notaDetectada);
+        Serial.print("Carregando sample: ");
+        Serial.println(arquivo);
+
+        audio_set_i2s_enabled(false);
+        volatile uint32_t loadedLen = 0;
+        if (storage_load_sample(arquivo, audio_get_sample_buffer(0), &loadedLen))
+        {
+          audio_set_slot_length(loadedLen, 0);
+          float notaDetectada = pitch_detect_midi_note(audio_get_sample_buffer(0), loadedLen);
+          audio_set_base_midi_note(notaDetectada, 0);
+          sequencer_mark_slot0_dirty();
+        }
+        audio_set_i2s_enabled(true);
       }
       instrumentoAtual = getCurrentInstrumentIndex();
     }
@@ -112,13 +126,26 @@ static void resolveUI()
     break;
 
   case Tela::GRAVANDO:
-    if (!recorder_is_recording())
+  case Tela::EDITAR_GRAVACAO:
+  case Tela::SOM_GRAVADO:
+    mode = 0x02;
+    break;
+
+  case Tela::COMPOSITOR:
+    mode = 0x03;
+    instrumentoAtual = -1; // Força recarga do Modo Teclado ao voltar para ele
+    if (!audio_is_i2s_enabled())
     {
-      recorder_start();
+      audio_set_i2s_enabled(true);
     }
     break;
 
-  case Tela::SOM_GRAVADO:
+  case Tela::SEQ_CONFIG:
+  case Tela::SEQ_SIMBOLOS:
+  case Tela::SEQ_ESCOLHER_SAMPLE:
+  case Tela::SEQ_ARQUIVOS:
+    mode = 0x04;
+    instrumentoAtual = -1;
     break;
   }
 }
@@ -129,6 +156,22 @@ static void core1_entry()
   while (1)
   {
     tight_loop_contents();
+
+    // Atualiza o sequenciador primeiro para disparar notas antes de redesenhar o OLED
+    if (sequencer_update())
+    {
+      if (getCurrentScreen() == Tela::COMPOSITOR)
+      {
+        ui_redraw_current();
+      }
+    }
+
+    // Processa conclusão de gravação fora da ISR do timer
+    if (recorder_consume_finished())
+    {
+      onRecordingFinished();
+    }
+
     midi_update();
     keyboard_loop();
     ui_update();
@@ -151,17 +194,14 @@ void setup()
   }
 
   audio_init();
-
+  sequencer_init();
   keyboard_init(onKeyboardNote, onKeyboardControl);
+  recorder_init(audio_get_record_buffer(), RECORD_MAX_SAMPLES);
+  ui_init();
+  led_matrix_init();
 
   multicore_launch_core1(core1_entry);
   Serial.println("Core1 started");
-
-  recorder_init(audio_get_sample_buffer(), onRecordingFinished);
-
-  ui_init();
-
-  led_matrix_init();
 }
 
 // Loop do núcleo 0

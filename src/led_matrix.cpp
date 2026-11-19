@@ -2,6 +2,7 @@
 #include "config.h"
 #include "audio_engine.h"
 #include "recorder.h"
+#include "sequencer.h"
 #include <Adafruit_NeoPixel.h>
 #include <arduinoFFT.h>
 
@@ -43,7 +44,8 @@ static void animarGravacao()
   matriz.clear();
 
   // 1. Calcula o progresso exato da gravação (de 0.0 a 1.0)
-  float progresso = (float)recorder_get_sample_index() / TAMANHO_BUFFER;
+  uint32_t maxSamples = recorder_get_max_samples();
+  float progresso = (maxSamples > 0) ? ((float)recorder_get_sample_index() / (float)maxSamples) : 0.0f;
 
   // O raio máximo num ecrã 5x5 (distância em cruz do centro até a ponta) é 4
   int raioAtual = (int)(progresso * 4.0);
@@ -253,7 +255,7 @@ void led_matrix_trigger_firework()
 
 void led_matrix_update(Tela telaAtual)
 {
-  if (telaAtual == Tela::TECLADO)
+  if (telaAtual == Tela::TECLADO || (telaAtual == Tela::COMPOSITOR && sequencer_is_playing()))
   {
     animarEspectroReal();
   }
