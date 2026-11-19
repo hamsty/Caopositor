@@ -61,6 +61,55 @@ static bool uiDirty = false;
 static unsigned long uiLastKeyEventMs = 0;
 static const unsigned long UI_KEY_REDRAW_DEBOUNCE_MS = 25;
 
+// Overlay temporário de volume (aparece ao ajustar volume e some automaticamente após 1.5s)
+static bool volumePopupActive = false;
+static uint8_t volumePopupValue = 255;
+static unsigned long volumePopupUntilMs = 0;
+static const unsigned long VOLUME_POPUP_DURATION_MS = 1500;
+
+static void ui_draw_volume_overlay()
+{
+    if (!volumePopupActive || telaAtual == Tela::GRAVANDO)
+    {
+        return;
+    }
+
+    // Caixa flutuante centralizada sobre a interface atual
+    display.setDrawColor(0);
+    display.drawBox(16, 18, 96, 28);
+    display.setDrawColor(1);
+    display.drawFrame(16, 18, 96, 28);
+    display.drawFrame(18, 20, 92, 24);
+
+    display.setFont(u8g2_font_6x10_tf);
+    int pct = ((int)volumePopupValue * 100 + 127) / 255;
+    char volStr[16];
+    if (volumePopupValue == 0)
+    {
+        snprintf(volStr, sizeof(volStr), "VOL: MUDO");
+    }
+    else
+    {
+        snprintf(volStr, sizeof(volStr), "VOL: %3d%%", pct);
+    }
+    display.drawStr(28, 31, volStr);
+
+    display.drawFrame(24, 35, 80, 6);
+    int fillW = ((int)volumePopupValue * 76) / 255;
+    if (fillW > 76)
+        fillW = 76;
+    if (fillW > 0)
+    {
+        display.drawBox(26, 37, fillW, 2);
+    }
+}
+
+static void ui_send_buffer()
+{
+    ui_draw_volume_overlay();
+    display.sendBuffer();
+}
+
 // Controle de teclas seguradas para registro de acordes e sustentação por múltiplos slots
 static bool seqHeldKeys[128] = {false};
 static uint8_t seqHeldCount = 0;
@@ -201,7 +250,7 @@ void ui_desenharMenu()
         display.drawStr(12, y, opcoes[i]);
     }
     display.setDrawColor(1);
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharModoMIDI()
@@ -216,7 +265,7 @@ static void desenharModoMIDI()
     display.drawStr(12, 46, "via USB");
     display.drawStr(0, 63, "B: Voltar");
 
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharModoTeclado()
@@ -271,7 +320,7 @@ static void desenharModoTeclado()
     {
         display.drawStr(0, 63, "OK: Escolher  B: Voltar");
     }
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharGravarSons()
@@ -285,7 +334,7 @@ static void desenharGravarSons()
     display.drawStr(12, 47, "iniciar gravacao");
     display.drawStr(0, 63, "B: Voltar");
 
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharGravando()
@@ -553,7 +602,7 @@ static void desenharEditarGravacao()
 
     // Rodapé de comandos
     display.drawStr(2, 63, "A:Ouvir OK:Salvar B:Sair");
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 void ui_open_recording_editor()
@@ -591,7 +640,7 @@ void desenharSomGravado()
     display.drawStr(5, 53, "A: Gravar outro");
     display.drawStr(5, 62, "B: Voltar ao menu");
 
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 // ---------- Telas do Sequenciador Estilo Mario Paint ----------
@@ -888,7 +937,7 @@ static void desenharCompositor()
         }
     }
 
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharSeqConfig()
@@ -938,7 +987,7 @@ static void desenharSeqConfig()
         display.drawStr(0, 63, "OK: Sel   B: Partitura");
     }
 
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharSeqSimbolos()
@@ -973,7 +1022,7 @@ static void desenharSeqSimbolos()
 
     display.setDrawColor(1);
     display.drawStr(0, 63, "OK: Trocar   B: Voltar");
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharSeqEscolherSample()
@@ -1014,7 +1063,7 @@ static void desenharSeqEscolherSample()
 
     display.setDrawColor(1);
     display.drawStr(0, 63, "OK: Usar     B: Voltar");
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 static void desenharSeqArquivos()
@@ -1053,7 +1102,7 @@ static void desenharSeqArquivos()
 
     display.setDrawColor(1);
     display.drawStr(0, 63, "OK: Abrir    B: Voltar");
-    display.sendBuffer();
+    ui_send_buffer();
 }
 
 void setCurrentScreen(Tela novaTela)
@@ -1108,6 +1157,20 @@ void ui_redraw_current()
 uint8_t ui_get_active_symbol()
 {
     return seqActiveSymbol;
+}
+
+void ui_show_volume_popup(uint8_t volume)
+{
+    volumePopupValue = volume;
+    if (telaAtual == Tela::GRAVANDO)
+    {
+        return;
+    }
+
+    volumePopupActive = true;
+    volumePopupUntilMs = millis() + VOLUME_POPUP_DURATION_MS;
+    uiDirty = true;
+    uiLastKeyEventMs = 0;
 }
 
 void ui_on_keyboard_note_played(uint8_t note)
@@ -1225,6 +1288,13 @@ void ui_on_composer_piano_key(uint8_t code, uint8_t note)
 void ui_update()
 {
     unsigned long agora = millis();
+
+    // Oculta o indicador flutuante de volume automaticamente após o tempo configurado
+    if (volumePopupActive && (int32_t)(agora - volumePopupUntilMs) >= 0)
+    {
+        volumePopupActive = false;
+        ui_redraw_current();
+    }
 
     // Atualiza barra de progresso durante gravação de áudio (até 6s)
     if (telaAtual == Tela::GRAVANDO && recorder_is_recording())

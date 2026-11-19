@@ -32,6 +32,7 @@ void ui_open_recording_editor();
 void ui_on_composer_piano_key(uint8_t code, uint8_t note);
 void ui_on_composer_rest_key();
 void ui_on_keyboard_note_played(uint8_t note);
+void ui_show_volume_popup(uint8_t volume);
 uint8_t ui_get_active_symbol();
 
 #endif

@@ -290,6 +290,11 @@ void audio_volume_down()
   Serial.println(volumeMestre);
 }
 
+uint8_t audio_get_volume()
+{
+  return volumeMestre;
+}
+
 void audio_handle_key(uint8_t code, uint8_t note, uint8_t slotId)
 {
   if (slotId >= SEQ_NUM_SYMBOLS)

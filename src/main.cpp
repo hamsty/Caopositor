@@ -62,16 +62,18 @@ static void onKeyboardControl(uint8_t key)
     }
     break;
   case 40:
-    keyboard_octave_down();
+    audio_volume_up();
+    ui_show_volume_popup(audio_get_volume());
     break;
   case 41:
-    keyboard_octave_up();
+    audio_volume_down();
+    ui_show_volume_popup(audio_get_volume());
     break;
   case 42:
-    audio_volume_down();
+    keyboard_octave_down();
     break;
   case 43:
-    audio_volume_up();
+    keyboard_octave_up();
     break;
   default:
     break;
