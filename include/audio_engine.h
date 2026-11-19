@@ -14,6 +14,7 @@ void audio_handle_key(uint8_t code, uint8_t note, uint8_t slotId = 0);
 void audio_stop_all();
 void audio_volume_up();
 void audio_volume_down();
+uint8_t audio_get_volume();
 
 int8_t *audio_get_sample_buffer(uint8_t slotId = 0);
 int8_t *audio_get_record_buffer(); // Slots 1..3 contíguos (96 KB = 6s) para gravação longa
